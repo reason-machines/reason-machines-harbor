@@ -27,7 +27,7 @@ class ReasonAgent(BaseAgent):
                  api_origin: str | None = None, worker_api_origin: str | None = None,
                  poll_interval_sec: float = DEFAULT_RUNTIME_CONFIG.poll_interval_sec,
                  reasoning_effort: str = "medium",
-                 mode: str = "isolated",
+                 mode: str = "ephemeral",
                  runtime_profile: str | None = None,
                  ephemeral_rcus: str | None = None,
                  **kwargs):
@@ -49,7 +49,7 @@ class ReasonAgent(BaseAgent):
         return "reason"
 
     def version(self) -> str:
-        return "0.3.1"
+        return "0.3.2"
 
     async def setup(self, environment: BaseEnvironment) -> None:
         mode = getattr(getattr(environment, "network_policy", None), "network_mode", "")
@@ -60,12 +60,8 @@ class ReasonAgent(BaseAgent):
         api_host = urlparse(driver.worker_api_origin).hostname
         # Local qualification must remain independent of public control-plane DNS.
         if api_host not in {"localhost", "127.0.0.1", "::1"}:
-            if driver.channel == "pr":
-                relay_host = urlparse(driver.pr_relay_origin).hostname if driver.pr_relay_origin else None
-            else:
-                relay_host = f"reason-central-relay-{driver.channel}.up.railway.app"
             try:
-                await prepare_control_plane_dns(environment, [host for host in (api_host, relay_host) if host])
+                await prepare_control_plane_dns(environment, [host for host in (api_host, *driver.relay_hosts()) if host])
             except TimeoutError:
                 raise ReasonWorkerStartupError("Reason worker setup timed out") from None
         image_env, workdir = await resolve_image_runtime(environment, self.logger)

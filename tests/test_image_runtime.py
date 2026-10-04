@@ -118,4 +118,4 @@ def test_unavailable_image_config_keeps_exec_shell_and_logs(tmp_path, monkeypatc
     assert "Task image config unavailable" in caplog.text
     assert reason.driver.workspace == "/root"
     start = asyncio.run(start_worker(reason.driver, environment))
-    assert start.startswith("cd /root && { nohup env /tmp/")
+    assert start.startswith("cd /root && { nohup env REASON_RELAY_CUSTOM_DOMAIN=1 /tmp/")

@@ -50,8 +50,7 @@ class AdapterRuntimeConfig:
     ephemeral_workspace_ttl_minutes: int = 240
     # A Session with no deadline on worker Hands gets no Reason capability plane
     # (memory, skills, MCP): its run token (3 h) cannot cover an unbounded
-    # turn. Modes that keep those components request a deadline the token
-    # covers; isolated mode has none to keep and stays unbounded.
+    # turn. Every Session requests a deadline the token covers.
     capability_session_wall_clock_max_ms: int = 170 * 60 * 1000
 
 

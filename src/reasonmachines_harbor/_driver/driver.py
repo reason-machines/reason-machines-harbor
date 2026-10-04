@@ -32,7 +32,7 @@ from xml.etree.ElementTree import Element, SubElement, indent, tostring
 import httpx
 import yaml
 
-from .bootstrap import resolve_benchmark_project, resolve_organization, resource_id
+from .bootstrap import resolve_organization, resource_id
 from .cli_release import (
     DEFAULT_CLI_ARCHIVE_SHA256,
     DEFAULT_CLI_ARCHIVE_URL,
@@ -42,27 +42,32 @@ from .cli_release import (
 )
 from .config import DEFAULT_RUNTIME_CONFIG
 
-SESSION_MODES = {"standard", "isolated", "ephemeral"}
-SYNC_YIELD_RUNTIME_PROFILE = "runtime/reason-sync-yield-v1"
-CAPABILITY_SHELL_RUNTIME_PROFILE = "runtime/reason-capability-shell-v1"
-# Requestable before the deployment offers it: preflight refuses a profile the
-# deployment does not advertise for this credential's organization.
+SESSION_MODES = {"standard", "ephemeral"}
+# Requested and attested as experimental_runtime_profile. Requestable before the
+# deployment offers one: preflight refuses a profile the deployment does not
+# advertise for this credential's organization (an ephemeral trial's parent).
 PI_C2_TOOLS_V7_RUNTIME_PROFILE = "runtime/ara-pi-c2-tools-v7"
-RUNTIME_PROFILES = {SYNC_YIELD_RUNTIME_PROFILE, CAPABILITY_SHELL_RUNTIME_PROFILE, PI_C2_TOOLS_V7_RUNTIME_PROFILE}
-# Organization-allowlisted profiles, requested and attested as experimental_runtime_profile.
-EXPERIMENTAL_RUNTIME_PROFILES = {CAPABILITY_SHELL_RUNTIME_PROFILE, PI_C2_TOOLS_V7_RUNTIME_PROFILE}
+REASON_V7_SYNC_YIELD_RUNTIME_PROFILE = "runtime/reason-v7-sync-yield-v1"
+RUNTIME_PROFILES = {PI_C2_TOOLS_V7_RUNTIME_PROFILE, REASON_V7_SYNC_YIELD_RUNTIME_PROFILE}
 WORKSPACE_OWNERSHIP = "externally-managed"
 # Public headless Sessions install a private environment before attaching Hands.
 REQUIRED_WORKER_CAPABILITIES = ("hands.connect", "environment.install")
 COMPONENTS = ("memoryRead", "memoryWrite", "skills", "inheritedInstructions", "integrations", "secretInjection")
 FAILURE_METRICS = ("worker_startup_timeout", "resource_loss", "suspended_session", "artifact_failure")
 ORIGINS = {
-    "staging": "https://staging-api.reasonmachines.ai",
-    "production": "https://api.reasonmachines.ai",
+    "staging": "https://staging-api.reasonmachines.com",
+    "production": "https://api.reasonmachines.com",
+}
+# The relay serves the same sessions on its reasonmachines.com domain and its
+# Railway host. The worker opts in (REASON_RELAY_CUSTOM_DOMAIN) to the custom
+# domain; the API hands out the Railway host until its alias is configured,
+# so the worker's egress setup prepares both.
+RELAY_HOSTS = {
+    "staging": ("staging-relay.reasonmachines.com", "reason-central-relay-staging.up.railway.app"),
+    "production": ("relay.reasonmachines.com", "reason-central-relay-production.up.railway.app"),
 }
 
 SAFE_API_ERRORS = frozenset({
-    "project_slug_conflict",
     "resource_unavailable", "pi_cancelled",
     "quota_exhausted", "group_max_runs_per_day", "group_spend_limit_exceeded",
     "invalid_request", "invalid_model", "invalid_reasoning_effort", "missing_scope",
@@ -194,8 +199,8 @@ class ReasonAPIError(RuntimeError):
 class ReasonDriver:
     """One benchmark trial: install, enroll and start a worker, then run one Session.
 
-    `framework` ("Harbor" or "Pier") labels guest paths, idempotency keys and
-    the shared benchmark project. The caller's AgentContext is used in place:
+    `framework` ("Harbor" or "Pier") labels guest paths and idempotency keys.
+    The caller's AgentContext is used in place:
     only `metadata`, `n_input_tokens`, `n_output_tokens`, `cost_usd` and, where
     present, `n_agent_steps` are set.
     """
@@ -213,7 +218,7 @@ class ReasonDriver:
                  docker_host_api: bool = False,
                  poll_interval_sec: float = DEFAULT_RUNTIME_CONFIG.poll_interval_sec,
                  reasoning_effort: str = "medium",
-                 mode: str = "isolated",
+                 mode: str = "ephemeral",
                  runtime_profile: str | None = None,
                  ephemeral_rcus: str | None = None,
                  mcp_servers: list[Any] | None = None, skills_dir: str | None = None,
@@ -224,7 +229,7 @@ class ReasonDriver:
         self.model_name = model_name
         self.logger = logger or logging.getLogger(__name__)
         if mode not in SESSION_MODES:
-            raise ValueError("mode must be standard, isolated, or ephemeral")
+            raise ValueError("mode must be standard or ephemeral")
         self.mode = mode
         # The parent's budget for an ephemeral workspace; "0" runs only on the
         # parent's own provider accounts (BYOK). The server defaults it to 30.
@@ -235,8 +240,6 @@ class ReasonDriver:
         self.ephemeral_rcus = None if ephemeral_rcus is None else str(ephemeral_rcus)
         if runtime_profile is not None and runtime_profile not in RUNTIME_PROFILES:
             raise ValueError("unsupported runtime_profile")
-        if runtime_profile == SYNC_YIELD_RUNTIME_PROFILE and mode != "isolated":
-            raise ValueError("sync-yield runtime_profile requires isolated mode")
         self.runtime_profile = runtime_profile
         if channel is None:
             channel = os.environ.get("REASON_CHANNEL")
@@ -311,7 +314,6 @@ class ReasonDriver:
             if not self.key:
                 raise ValueError(f"set REASON_API_KEY or {prefix}_API_KEY on the controller")
         self.org = ""
-        self.project_id = None
         # Ephemeral mode: the controller key only creates and retires the
         # single-use child workspace; the child key stays in its client's memory.
         self.parent_org = ""
@@ -421,7 +423,7 @@ class ReasonDriver:
         if (not isinstance(supported, list) or self.mode not in supported
                 or not isinstance(ownerships, list) or WORKSPACE_OWNERSHIP not in ownerships):
             raise RuntimeError("deployment does not advertise the required Session mode and workspace ownership; refusing enrollment")
-        runtime_profiles = deployment.get(f"{self._runtime_profile_field()}s")
+        runtime_profiles = deployment.get("experimental_runtime_profiles")
         if self.runtime_profile is not None and (
             not isinstance(runtime_profiles, list) or self.runtime_profile not in runtime_profiles
         ):
@@ -439,29 +441,19 @@ class ReasonDriver:
         self.org = await resolve_organization(
             self._request_api, self.ephemeral_org if self.mode == "ephemeral" else self.expected_org,
         )
-        if self.mode == "isolated":
-            self.project_id = await resolve_benchmark_project(
-                self._request_api, self.org, f"{self.framework} Benchmarks",
-            )
-        self._save("project.json", {"org_id": self.org, "project_id": self.project_id, **self._pr_receipt()})
-
-    def _runtime_profile_field(self):
-        return ("experimental_runtime_profile"
-                if self.runtime_profile in EXPERIMENTAL_RUNTIME_PROFILES else "runtime_profile")
 
     def _attest_policy(self, session, *, require_runtime_profile=True):
         """Require the server's resolved policy, not just an echoed mode request."""
         policy = session.get("session_policy")
-        expected_enabled = self.mode != "isolated"
         components = policy.get("components") if isinstance(policy, dict) else None
         if (not isinstance(policy, dict) or type(policy.get("version")) is not int
                 or policy["version"] != 1 or policy.get("mode") != self.mode
                 or policy.get("workspaceOwnership") != WORKSPACE_OWNERSHIP
                 or not isinstance(components, dict) or set(components) != set(COMPONENTS)
-                or any(components[name] is not expected_enabled for name in COMPONENTS)):
+                or any(components[name] is not True for name in COMPONENTS)):
             raise RuntimeError("server did not attest the requested Session component policy and workspace ownership")
         if (require_runtime_profile and self.runtime_profile is not None
-                and session.get(self._runtime_profile_field()) != self.runtime_profile):
+                and session.get("experimental_runtime_profile") != self.runtime_profile):
             raise RuntimeError("server did not attest the requested runtime profile")
         return policy
 
@@ -469,8 +461,7 @@ class ReasonDriver:
         body = {
             "prompt": instruction, "model": self.model_name,
             "reasoning_effort": self.reasoning_effort,
-            "execution_budget": {"wall_clock_max_ms": 0 if self.mode == "isolated"
-                                 else DEFAULT_RUNTIME_CONFIG.capability_session_wall_clock_max_ms},
+            "execution_budget": {"wall_clock_max_ms": DEFAULT_RUNTIME_CONFIG.capability_session_wall_clock_max_ms},
             "idempotency_key": f"{self.label}-{self.trial_key}", "completion_mode": "run_outcome",
             "mode": self.mode, "workspace_ownership": WORKSPACE_OWNERSHIP,
             "target": {"kind": "headless", "device_id": self.device_id,
@@ -481,10 +472,8 @@ class ReasonDriver:
             # WORKDIR, or `pwd -P` without one; see setup) as its cwd. Other
             # profiles keep main's request bytes.
             body["target"]["workspace_path"] = self.workspace
-        if self.project_id is not None:
-            body["project_id"] = self.project_id
         if self.runtime_profile is not None:
-            body[self._runtime_profile_field()] = self.runtime_profile
+            body["experimental_runtime_profile"] = self.runtime_profile
         return body
 
     def _task_prompt(self, instruction: str) -> str:
@@ -538,7 +527,7 @@ class ReasonDriver:
                 "--reasoning-effort", self.reasoning_effort]
         if self.runtime_profile is not None:
             args.extend(["--runtime-profile", self.runtime_profile])
-        elif self.mode != "standard":
+        if self.mode != "standard":
             args.extend(["--mode", self.mode])
         return shlex.join(args)
 
@@ -901,6 +890,13 @@ class ReasonDriver:
                 original_error.add_note("Reason worker setup cleanup also failed")
             raise
 
+    def relay_hosts(self) -> list[str]:
+        """Relay hostnames the worker may be handed, custom domain first."""
+        if self.channel == "pr":
+            host = urlparse(self.pr_relay_origin).hostname if self.pr_relay_origin else None
+            return [host] if host else []
+        return list(RELAY_HOSTS[self.channel])
+
     async def _start_proxy_bridge(self, environment, proxy_url):
         """Route the worker's TLS through the guest's authenticated egress proxy.
 
@@ -912,20 +908,17 @@ class ReasonDriver:
         p_host = p_parsed.hostname or ""
         p_port = p_parsed.port or 8080
         p_auth = f"{p_parsed.username}:{p_parsed.password}" if p_parsed.username else ""
-        api_host = urlparse(self.worker_api_origin).hostname or "staging-api.reasonmachines.ai"
+        api_host = urlparse(self.worker_api_origin).hostname or "staging-api.reasonmachines.com"
         # The worker retains its loopback-only development contract. The
         # authenticated proxy reaches the API on the Docker host; no task
         # network policy or framework core is changed.
         if self.docker_host_api:
             api_host = "host.docker.internal"
-        if self.channel == "pr":
-            relay_host = urlparse(self.pr_relay_origin).hostname
-        else:
-            relay_host = "reason-central-relay-staging.up.railway.app" if self.channel == "staging" else "reason-central-relay-production.up.railway.app"
+        relay_hosts = " ".join(shlex.quote(host) for host in self.relay_hosts())
         bridge_path = f"{self.remote}/bridge.py"
         encoded_bridge = base64.b64encode(_PROXY_BRIDGE.encode("utf-8")).decode("ascii")
         await self._exec(environment, f"echo {shlex.quote(encoded_bridge)} | base64 -d > {shlex.quote(bridge_path)}")
-        await self._exec(environment, f"echo '127.0.0.1 {shlex.quote(api_host)} {shlex.quote(relay_host)}' >> /etc/hosts || true")
+        await self._exec(environment, f"echo '127.0.0.1 {shlex.quote(api_host)} {relay_hosts}' >> /etc/hosts || true")
         await self._exec(environment, f"nohup python3 {shlex.quote(bridge_path)} 443 {shlex.quote(api_host)} 443 {shlex.quote(p_host)} {p_port} {shlex.quote(p_auth)} > {shlex.quote(self.remote)}/bridge.log 2>&1 &")
         await asyncio.sleep(0.5)
 
@@ -960,7 +953,7 @@ class ReasonDriver:
         # Background only the redirected command: `cd X && cmd &` would background
         # the whole list in a subshell that keeps the exec's stdout open until the
         # worker exits, so the exec never returns.
-        await self._exec(env, f"cd {shlex.quote(self.workspace)} && {{ nohup env{image_env} "
+        await self._exec(env, f"cd {shlex.quote(self.workspace)} && {{ nohup env{image_env} REASON_RELAY_CUSTOM_DOMAIN=1 "
                          f"{self.binary} worker start --config {self.config_path} "
                          f"--enrollment-file {self.remote}/enrollment.json "
                          f">{self.remote}/worker.log 2>&1 </dev/null & }}")
@@ -1260,7 +1253,7 @@ class ReasonDriver:
                                         "failure_metrics": {name: False for name in FAILURE_METRICS},
                                         "worker_status_retry_count": 0,
                                         "session_id": self.ara_session_id, "device_id": self.device_id,
-                                        "org_id": self.org, "project_id": self.project_id,
+                                        "org_id": self.org,
                                         "session_policy": policy, "channel": self.channel,
                                         "cli_sha256": self.archive_sha, "cli_version": self.cli_version,
                                         "reasoning_effort": self.reasoning_effort}
@@ -1315,10 +1308,10 @@ class ReasonDriver:
                                 self._save("trajectory.json", trajectory)
                             except Exception as traj_err:
                                 self.logger.debug(f"Failed to fetch session trajectory: {traj_err}")
-                            if self.runtime_profile == PI_C2_TOOLS_V7_RUNTIME_PROFILE:
+                            if self.runtime_profile is not None:
                                 # Polling snapshots omit the profile, and a continuation can
                                 # re-admit a Session to another profile after create; score a
-                                # v7 trial only if its ended Session record still names v7.
+                                # trial only if its ended Session record still names its profile.
                                 self._attest_policy(await self._api(
                                     "GET", f"sessions/{quote(self.ara_session_id, safe='')}",
                                 ))
