@@ -31,13 +31,14 @@ DOCKER_DEFAULT_PLATFORM=linux/amd64 .venv/bin/harbor run \
   --agent reasonmachines_harbor:ReasonAgent \
   --model openai/gpt-6-luna \
   --ak reasoning_effort=xhigh \
-  --allow-agent-host api.reasonmachines.ai \
-  --allow-agent-host reason-central-relay-production.up.railway.app \
+  --allow-agent-host api.reasonmachines.com \
+  --allow-agent-host relay.reasonmachines.com \
   --env reasonmachines_harbor.environment:ReasonDockerEnvironment
 ```
 
 Both `--allow-agent-host` flags are required: the worker connects out to the
-Reason API and relay, even for tasks that otherwise run without internet.
+Reason API and relay, even for tasks that otherwise run without internet. Use
+`reason-machines-harbor` 0.3.2 or later for these hostnames.
 
 | Agent kwarg (`--ak`) | Default | Meaning |
 |---|---|---|
