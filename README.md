@@ -12,7 +12,7 @@ the container only receives a one-use enrollment ticket.
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv/bin/python \
-  "reason-machines-harbor @ git+https://github.com/reason-machines/harbor-adapter@v0.3.0"
+  "reason-machines-harbor @ git+https://github.com/reason-machines/reason-machines-harbor@v0.3.0"
 ```
 
 This also installs Harbor 0.22.0. While this repository is private, run
