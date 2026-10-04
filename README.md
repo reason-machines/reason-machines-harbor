@@ -10,13 +10,12 @@ the container only receives a one-use enrollment ticket.
 ## Install
 
 ```bash
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python \
-  "reason-machines-harbor @ git+https://github.com/reason-machines/reason-machines-harbor@v0.3.0"
+uv pip install reason-machines-harbor
 ```
 
-This also installs Harbor 0.22.0. While this repository is private, run
-`gh auth setup-git` first so Git can use your GitHub login.
+This also installs Harbor 0.22.0. For cloud environments such as Modal or
+E2B, also install the matching Harbor extra, for example
+`uv pip install "harbor[modal]==0.22.0"`.
 
 ## Run
 
