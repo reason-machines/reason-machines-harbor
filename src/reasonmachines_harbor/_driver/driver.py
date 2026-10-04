@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager
 from email.utils import parsedate_to_datetime
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Protocol
 from urllib.parse import quote, urlparse
 from uuid import uuid4
@@ -43,6 +44,10 @@ from .cli_release import (
 from .config import DEFAULT_RUNTIME_CONFIG
 
 SESSION_MODES = {"standard", "ephemeral"}
+# A guest's login shell can print before a command runs: the micromamba images in
+# Terminal-Bench (freecad-*, vba-userform-port) print an activation banner as root.
+# Every parsed command first prints this marker, and only what follows it is output.
+GUEST_OUTPUT_MARKER = "__reason_guest_output__"
 # Requested and attested as experimental_runtime_profile. Requestable before the
 # deployment offers one: preflight refuses a profile the deployment does not
 # advertise for this credential's organization (an ephemeral trial's parent).
@@ -80,7 +85,7 @@ SAFE_API_ERRORS = frozenset({
     "central_relay_unavailable",
     "agent_model_key_missing", "local_device_incompatible", "idempotency_profile_conflict", "idempotency_target_conflict",
     "benchmark_profile_requires_headless_project_root", "benchmark_profile_requires_fresh_session",
-    "prompt_required", "prompt_too_large", "request_too_large", "rate_limit_exceeded",
+    "prompt_required", "prompt_too_large", "request_too_large", "rate_limit_exceeded", "instruction_blocked",
     "ephemeral_workspaces_not_enabled", "ephemeral_workspace_reference_conflict", "ephemeral_workspace_retired",
     "ephemeral_workspace_limit_reached", "ephemeral_workspace_key_unavailable",
     "ephemeral_workspace_parent_payment_required", "ephemeral_workspace_parent_credit_exhausted", "ephemeral_workspace_required",
@@ -501,16 +506,16 @@ class ReasonDriver:
 
     async def _describe_skills(self, env) -> str:
         """Return an <available_skills> block for `<skills_dir>/*/SKILL.md` in the guest."""
-        result = await env.exec(
-            f"cd {shlex.quote(self.skills_dir)} && find \"$PWD\" -mindepth 2 -maxdepth 2 -name SKILL.md -type f | sort",
-            timeout_sec=DEFAULT_RUNTIME_CONFIG.diagnostics_timeout_sec,
+        result = await self._guest_exec(
+            env, f"cd {shlex.quote(self.skills_dir)} && find \"$PWD\" -mindepth 2 -maxdepth 2 -name SKILL.md -type f | sort",
+            DEFAULT_RUNTIME_CONFIG.diagnostics_timeout_sec,
         )
         if result.return_code != 0 or not (result.stdout or "").strip():
             return ""
         root = Element("available_skills")
         for location in result.stdout.strip().splitlines():
-            content = await env.exec(f"cat {shlex.quote(location)}",
-                                     timeout_sec=DEFAULT_RUNTIME_CONFIG.diagnostics_timeout_sec)
+            content = await self._guest_exec(env, f"cat {shlex.quote(location)}",
+                                             DEFAULT_RUNTIME_CONFIG.diagnostics_timeout_sec)
             match = re.match(r"^---\n(.*?)\n---", content.stdout or "", re.DOTALL) if content.return_code == 0 else None
             try:
                 frontmatter = yaml.safe_load(match.group(1)) if match else None
@@ -716,11 +721,11 @@ class ReasonDriver:
 
     async def _capture_worker_diagnostics(self, env):
         try:
-            result = await env.exec(
-                f"tail -c {DEFAULT_RUNTIME_CONFIG.diagnostics_tail_bytes} {self.remote}/worker.log",
-                timeout_sec=DEFAULT_RUNTIME_CONFIG.diagnostics_timeout_sec,
+            result = await self._guest_exec(
+                env, f"tail -c {DEFAULT_RUNTIME_CONFIG.diagnostics_tail_bytes} {self.remote}/worker.log",
+                DEFAULT_RUNTIME_CONFIG.diagnostics_timeout_sec,
             )
-            projected = self._diagnostic((result.stdout or "") + "\n" + (result.stderr or ""))
+            projected = self._diagnostic(result.stdout + "\n" + result.stderr)
             projected["read_exit_code"] = result.return_code
             self._save("worker-diagnostics.json", projected)
         except Exception:
@@ -729,13 +734,22 @@ class ReasonDriver:
     async def _exec(self, env, command, timeout=None):
         timeout = DEFAULT_RUNTIME_CONFIG.command_timeout_sec if timeout is None else timeout
         timeout_sec = int(math.ceil(timeout)) if timeout is not None else None
-        result = await env.exec(command, timeout_sec=timeout_sec)
+        result = await self._guest_exec(env, command, timeout_sec)
         if result.return_code != 0:
-            diagnostic = self._diagnostic((result.stdout or "") + "\n" + (getattr(result, "stderr", "") or ""))
+            diagnostic = self._diagnostic(result.stdout + "\n" + result.stderr)
             diagnostic["exit_code"] = result.return_code
             self._save("command-error.json", diagnostic)
             raise RuntimeError("Reason worker command failed: " + json.dumps(diagnostic))
-        return result.stdout or ""
+        return result.stdout
+
+    @staticmethod
+    async def _guest_exec(env, command, timeout_sec):
+        """Run a command whose output is parsed, without the shell's startup output."""
+        result = await env.exec(f"printf '%s\\n' {GUEST_OUTPUT_MARKER}; {command}", timeout_sec=timeout_sec)
+        stdout = result.stdout or ""
+        _, marker, output = stdout.partition(GUEST_OUTPUT_MARKER + "\n")
+        return SimpleNamespace(return_code=result.return_code, stdout=output if marker else stdout,
+                               stderr=getattr(result, "stderr", "") or "")
 
     async def _upload_json(self, env, value, target):
         with tempfile.TemporaryDirectory(prefix=f"reason-{self.label}-ticket-") as directory:
@@ -804,7 +818,7 @@ class ReasonDriver:
                 raise RuntimeError("runtime dependencies still missing after package installation")
         versions = {}
         for tool in ("bash", "git", "tar", "gzip"):
-            result = await env.exec(f"{tool} --version", timeout_sec=DEFAULT_RUNTIME_CONFIG.tool_version_timeout_sec)
+            result = await self._guest_exec(env, f"{tool} --version", DEFAULT_RUNTIME_CONFIG.tool_version_timeout_sec)
             first = (result.stdout or result.stderr or "").splitlines()
             version = first[0][:160] if first else "unavailable"
             versions[tool] = version if re.fullmatch(r"[A-Za-z0-9 ()+.,_/:;=-]{1,160}", version) else "available"
@@ -978,9 +992,8 @@ class ReasonDriver:
             remaining = deadline - time.monotonic()
             status_timeout = min(DEFAULT_RUNTIME_CONFIG.worker_status_timeout_sec, max(1, math.ceil(remaining)))
             try:
-                result = await env.exec(
-                    f"{self.binary} worker status --config {self.config_path} --json",
-                    timeout_sec=status_timeout,
+                result = await self._guest_exec(
+                    env, f"{self.binary} worker status --config {self.config_path} --json", status_timeout,
                 )
             except (TimeoutError, httpx.TimeoutException, httpx.TransportError, RuntimeError) as error:
                 if isinstance(error, RuntimeError) and not self._is_worker_status_timeout(error):

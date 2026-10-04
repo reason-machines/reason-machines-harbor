@@ -34,6 +34,7 @@ class FakeE2BEnvironment:
         return {"TASK_VALUE": "task"}
 
     async def exec(self, command, timeout_sec=None, **_):
+        command = command.split("__reason_guest_output__; ", 1)[-1]
         self.commands.append(command)
         if "worker status" in command:
             raise WorkerStarted

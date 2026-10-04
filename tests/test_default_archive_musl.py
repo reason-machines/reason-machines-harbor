@@ -55,10 +55,13 @@ def archive_bytes():
 
 
 class Guest:
-    def __init__(self, libc):
+    def __init__(self, libc, banner=""):
         self.libc = libc
+        self.banner = banner
 
     async def exec(self, command, timeout_sec=None, **_):
+        marked = "__reason_guest_output__; " in command
+        command = command.split("__reason_guest_output__; ", 1)[-1]
         if command.startswith("uname -s"):
             stdout = "Linux\nx86_64\n" + ("musl\n" if self.libc == "musl" else "glibc 2.36\n")
         elif "ld-musl-x86_64.so.1 ]; then printf musl" in command:
@@ -69,13 +72,15 @@ class Guest:
             stdout = "1.2.3\n"
         else:
             stdout = ""
+        # The shell's startup output comes first, as micromamba images print as root.
+        stdout = self.banner + ("__reason_guest_output__\n" if marked else "") + stdout
         return SimpleNamespace(return_code=0, stdout=stdout, stderr="")
 
     async def upload_file(self, source_path, target_path):
         pass
 
 
-def install(tmp_path, monkeypatch, libc):
+def install(tmp_path, monkeypatch, libc, banner=""):
     monkeypatch.setenv("REASON_API_KEY", "test-key")
     payload = archive_bytes()
     sha = hashlib.sha256(payload).hexdigest()
@@ -95,7 +100,7 @@ def install(tmp_path, monkeypatch, libc):
     monkeypatch.setattr(driver_module, "fetch_archive", fetch)
     reason = ReasonAgent(logs_dir=tmp_path / "logs", model_name="openai/gpt-6-luna")
     assert reason.driver.uses_default_archive
-    asyncio.run(reason.driver.setup(Guest(libc)))
+    asyncio.run(reason.driver.setup(Guest(libc, banner)))
     return reason.driver, fetched
 
 
@@ -108,3 +113,12 @@ def test_alpine_guest_installs_the_stable_musl_build(tmp_path, monkeypatch):
 def test_glibc_guest_still_installs_the_glibc_build(tmp_path, monkeypatch):
     driver, fetched = install(tmp_path, monkeypatch, "glibc")
     assert fetched == [f"{BASE}/glibc.tgz"]
+
+
+def test_shell_startup_output_does_not_corrupt_parsed_commands(tmp_path, monkeypatch):
+    banner = "critical libmamba Shell not initialized\n'micromamba' is running as a subprocess\n"
+    driver, fetched = install(tmp_path, monkeypatch, "glibc", banner)
+    assert fetched == [f"{BASE}/glibc.tgz"]
+    assert driver.workspace == "/root"
+    assert driver.cli_version == "1.2.3"
+
