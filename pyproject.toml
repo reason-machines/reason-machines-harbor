@@ -1,0 +1,19 @@
+[build-system]
+requires = ["hatchling>=1.26,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reason-machines-harbor"
+version = "0.3.0"
+description = "Harbor adapter for the public Reason Machines portable worker"
+requires-python = ">=3.12"
+dependencies = ["harbor==0.22.0", "httpx>=0.28,<0.29", "pyyaml>=6,<7"]
+
+[project.entry-points."harbor.agents"]
+reason = "reason:reason"
+
+[tool.hatch.build.targets.wheel]
+# reasonmachines_harbor/_driver links to packages/reason-machines-driver. Builds
+# copy it into this package, so the sdist and wheel are self-contained and
+# never share installed files with the other adapter.
+packages = ["src/reason", "src/reasonmachines_harbor"]
