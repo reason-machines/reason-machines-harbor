@@ -48,7 +48,10 @@ SESSION_MODES = {"standard", "ephemeral"}
 # advertise for this credential's organization (an ephemeral trial's parent).
 PI_C2_TOOLS_V7_RUNTIME_PROFILE = "runtime/ara-pi-c2-tools-v7"
 REASON_V7_SYNC_YIELD_RUNTIME_PROFILE = "runtime/reason-v7-sync-yield-v1"
-RUNTIME_PROFILES = {PI_C2_TOOLS_V7_RUNTIME_PROFILE, REASON_V7_SYNC_YIELD_RUNTIME_PROFILE}
+# Reason's SDK as `reason-sdk` on the machine: the server runs it in ephemeral mode only.
+REASON_V7_SYNC_YIELD_MACHINE_SDK_RUNTIME_PROFILE = "runtime/reason-v7-sync-yield-machine-sdk-v1"
+RUNTIME_PROFILES = {PI_C2_TOOLS_V7_RUNTIME_PROFILE, REASON_V7_SYNC_YIELD_RUNTIME_PROFILE,
+                    REASON_V7_SYNC_YIELD_MACHINE_SDK_RUNTIME_PROFILE}
 WORKSPACE_OWNERSHIP = "externally-managed"
 # Public headless Sessions install a private environment before attaching Hands.
 REQUIRED_WORKER_CAPABILITIES = ("hands.connect", "environment.install")
@@ -240,6 +243,8 @@ class ReasonDriver:
         self.ephemeral_rcus = None if ephemeral_rcus is None else str(ephemeral_rcus)
         if runtime_profile is not None and runtime_profile not in RUNTIME_PROFILES:
             raise ValueError("unsupported runtime_profile")
+        if runtime_profile == REASON_V7_SYNC_YIELD_MACHINE_SDK_RUNTIME_PROFILE and mode != "ephemeral":
+            raise ValueError("machine-sdk runtime_profile requires ephemeral mode")
         self.runtime_profile = runtime_profile
         if channel is None:
             channel = os.environ.get("REASON_CHANNEL")
@@ -351,6 +356,8 @@ class ReasonDriver:
         # musl (Alpine) task images cannot exec the glibc build.
         self.musl_archive_path = cli_archive_musl_path or os.environ.get("REASON_CLI_ARCHIVE_MUSL_PATH") or None
         self.musl_archive_sha = cli_archive_musl_sha256 or os.environ.get("REASON_CLI_ARCHIVE_MUSL_SHA256") or ""
+        # Set from the stable release when the default archive is used.
+        self.musl_archive_url: str | None = None
         if self.musl_archive_path and not re.fullmatch(r"[a-f0-9]{64}", self.musl_archive_sha):
             raise ValueError("cli_archive_musl_path requires a lowercase SHA256")
         if reasoning_effort not in {"minimal", "low", "medium", "high", "xhigh", "max"}:
@@ -750,6 +757,9 @@ class ReasonDriver:
         resolution = await resolve_stable_archive(downloader)
         self.archive_url = resolution["archive_url"]
         self.archive_sha = resolution["archive_sha256"]
+        if not self.musl_archive_path and resolution.get("musl_archive_url"):
+            self.musl_archive_url = resolution["musl_archive_url"]
+            self.musl_archive_sha = resolution["musl_archive_sha256"]
         self._save("cli-resolution.json", resolution)
         if resolution["fallback_reason"]:
             self.logger.warning("Reason CLI packaged_fallback: %s; selected=%s sha256=%s",
@@ -822,14 +832,15 @@ class ReasonDriver:
     async def _setup(self, environment: Sandbox, egress_proxy: str | None, workdir: str | None) -> None:
         # No Device/Session is allocated in setup: run's finally owns their lifetime.
         if self.uses_default_archive:
-            guidance = ("The automatic CLI archive requires a Linux x86_64 guest with glibc. "
+            guidance = ("The automatic CLI archive requires a Linux x86_64 guest with glibc or musl. "
                         "Provide an explicit worker archive via cli_archive_path or cli_archive_url "
                         "and cli_archive_sha256 for this guest.")
             try:
-                abi = await self._exec(environment, "uname -s && uname -m && getconf GNU_LIBC_VERSION")
+                abi = await self._exec(environment, "uname -s && uname -m && { getconf GNU_LIBC_VERSION 2>/dev/null"
+                                                    " || { [ -e /lib/ld-musl-x86_64.so.1 ] && echo musl; }; }")
             except RuntimeError:
                 raise ValueError(guidance) from None
-            if not re.fullmatch(r"Linux\nx86_64\nglibc [0-9]+(?:\.[0-9]+)+\n?", abi):
+            if not re.fullmatch(r"Linux\nx86_64\n(?:glibc [0-9]+(?:\.[0-9]+)+|musl)\n?", abi):
                 raise ValueError(guidance)
         if self.channel == "pr" and not self.pr_relay_origin and egress_proxy:
             raise ValueError("PR proxy transport requires an explicit same-PR pr_relay_origin")
@@ -843,13 +854,13 @@ class ReasonDriver:
         try:
             await self._ensure_dependencies(environment)
             musl = (await self._exec(environment, "if [ -e /lib/ld-musl-x86_64.so.1 ]; then printf musl; fi")).strip() == "musl"
-            if musl and not self.musl_archive_path:
+            if musl and not self.musl_archive_path and not self.uses_default_archive:
                 raise ValueError("musl task image requires cli_archive_musl_path and cli_archive_musl_sha256")
             with tempfile.TemporaryDirectory(prefix=f"reason-{self.label}-archive-") as directory:
                 archive = Path(directory) / "worker.tgz"
-                if musl:
+                if musl and self.musl_archive_path:
                     archive.write_bytes(Path(self.musl_archive_path).expanduser().read_bytes())
-                elif self.archive_path:
+                elif not musl and self.archive_path:
                     archive.write_bytes(Path(self.archive_path).expanduser().read_bytes())
                 else:
                     async with httpx.AsyncClient(
@@ -858,7 +869,11 @@ class ReasonDriver:
                     ) as downloader:
                         if self.uses_default_archive:
                             await self._resolve_default_archive(downloader)
-                        archive.write_bytes(await fetch_archive(downloader, self.archive_url))
+                        if musl and not self.musl_archive_url:
+                            raise ValueError("the stable Reason CLI release has no linux-x64-musl archive; "
+                                             "provide cli_archive_musl_path and cli_archive_musl_sha256")
+                        archive.write_bytes(await fetch_archive(
+                            downloader, self.musl_archive_url if musl else self.archive_url))
                 verify_archive(archive, self.musl_archive_sha if musl else self.archive_sha)
                 await environment.upload_file(source_path=archive, target_path=f"{self.remote}/worker.tgz")
             await self._exec(environment, f"tar -xzf {self.remote}/worker.tgz -C {self.remote} && test -x {self.binary}")

@@ -141,6 +141,9 @@ async def resolve_stable_archive(downloader: httpx.AsyncClient) -> dict:
     # process-wide cache. Once setup ends, the admitted binary stays fixed.
     archive_url = DEFAULT_CLI_ARCHIVE_URL
     archive_sha = DEFAULT_CLI_ARCHIVE_SHA256
+    # Alpine task images need the musl build. The packaged fallback has none, and
+    # a release without a valid one leaves musl guests unsupported.
+    musl_url = musl_sha = None
     try:
         latest = await fetch_manifest(downloader, DEFAULT_CLI_MANIFEST_URL)
         if not isinstance(latest, dict):
@@ -173,6 +176,11 @@ async def resolve_stable_archive(downloader: httpx.AsyncClient) -> dict:
             raise CliManifestError("manifest_invalid_archive")
         if not isinstance(sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", sha256):
             raise CliManifestError("manifest_invalid_checksum")
+        musl = next((candidate for candidate in targets
+                     if isinstance(candidate, dict) and candidate.get("id") == "linux-x64-musl"), None)
+        if (musl is not None and musl.get("archive") == f"reason-machines-cli-linux-x64-musl-{version}.tgz"
+                and isinstance(musl.get("sha256"), str) and re.fullmatch(r"[a-f0-9]{64}", musl["sha256"])):
+            musl_url, musl_sha = f"{base_url}/{musl['archive']}", musl["sha256"]
         archive_url = f"{base_url}/{archive}"
         archive_sha = sha256
     except CliManifestError as error:
@@ -187,6 +195,8 @@ async def resolve_stable_archive(downloader: httpx.AsyncClient) -> dict:
         "requested_version": requested_version,
         "selected_version": archive_url.rsplit("cli-v", 1)[1].split("/", 1)[0],
         "archive_url": archive_url, "archive_sha256": archive_sha,
+        "musl_archive_url": None if fallback_reason else musl_url,
+        "musl_archive_sha256": None if fallback_reason else musl_sha,
         "fallback_reason": fallback_reason,
     }
 
