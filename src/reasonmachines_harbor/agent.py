@@ -49,7 +49,7 @@ class ReasonAgent(BaseAgent):
         return "reason"
 
     def version(self) -> str:
-        return "0.3.0"
+        return "0.3.1"
 
     async def setup(self, environment: BaseEnvironment) -> None:
         mode = getattr(getattr(environment, "network_policy", None), "network_mode", "")
