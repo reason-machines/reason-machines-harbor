@@ -29,6 +29,7 @@ class ReasonAgent(BaseAgent):
                  reasoning_effort: str = "medium",
                  mode: str = "ephemeral",
                  runtime_profile: str | None = None,
+                 runtime_features: str | list[str] | None = None,
                  ephemeral_rcus: str | None = None,
                  **kwargs):
         super().__init__(*args, **kwargs)
@@ -39,7 +40,7 @@ class ReasonAgent(BaseAgent):
             cli_archive_url=cli_archive_url, cli_archive_musl_path=cli_archive_musl_path,
             cli_archive_musl_sha256=cli_archive_musl_sha256, api_origin=api_origin, worker_api_origin=worker_api_origin,
             poll_interval_sec=poll_interval_sec, reasoning_effort=reasoning_effort, mode=mode,
-            runtime_profile=runtime_profile, ephemeral_rcus=ephemeral_rcus,
+            runtime_profile=runtime_profile, runtime_features=runtime_features, ephemeral_rcus=ephemeral_rcus,
             mcp_servers=self.mcp_servers, skills_dir=self.skills_dir,
             extra_env=self.extra_env, load_trajectory=self.load_trajectory,
         )
@@ -49,7 +50,7 @@ class ReasonAgent(BaseAgent):
         return "reason"
 
     def version(self) -> str:
-        return "0.3.4"
+        return "0.3.7"
 
     async def setup(self, environment: BaseEnvironment) -> None:
         mode = getattr(getattr(environment, "network_policy", None), "network_mode", "")

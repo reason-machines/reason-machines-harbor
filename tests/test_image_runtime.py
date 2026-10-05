@@ -4,6 +4,7 @@ import hashlib
 import io
 import logging
 import shlex
+import subprocess
 import tarfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from reasonmachines_harbor import ReasonAgent, image_runtime
-from reasonmachines_harbor._driver.driver import PI_C2_TOOLS_V7_RUNTIME_PROFILE
+from reasonmachines_harbor._driver.driver import C2_TOOLS_V7_RUNTIME_PROFILE
 
 GO_PATH = "/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 IMAGE_CONFIG = {"Env": [f"PATH={GO_PATH}", "GOPATH=/go", "GOMODCACHE=/go/pkg/mod", "TASK_VALUE=image"],
@@ -61,7 +62,7 @@ def agent(tmp_path, monkeypatch):
     path, sha = worker_archive(tmp_path)
     return ReasonAgent(logs_dir=tmp_path / "logs", model_name="openai/gpt-5.6-luna",
                        cli_archive_path=path, cli_archive_sha256=sha,
-                       runtime_profile=PI_C2_TOOLS_V7_RUNTIME_PROFILE)
+                       runtime_profile=C2_TOOLS_V7_RUNTIME_PROFILE)
 
 
 async def start_worker(driver, environment):
@@ -120,3 +121,28 @@ def test_unavailable_image_config_keeps_exec_shell_and_logs(tmp_path, monkeypatc
     assert reason.driver.workspace == "/root"
     start = asyncio.run(start_worker(reason.driver, environment))
     assert start.startswith("cd /root && { nohup env REASON_RELAY_CUSTOM_DOMAIN=1 /tmp/")
+
+
+def test_worker_wrapper_drops_environment_the_worker_refuses(tmp_path, monkeypatch):
+    # oven/bun sets BUN_RUNTIME_TRANSPILER_CACHE_PATH; the worker exits 78 on it.
+    monkeypatch.setattr(image_runtime, "registry_config", lambda image: IMAGE_CONFIG)
+    reason = agent(tmp_path, monkeypatch)
+    environment = FakeE2BEnvironment(tmp_path)
+    asyncio.run(reason.setup(environment))
+    remote = reason.driver.remote
+    write = next(command for command in environment.commands if "ara-clean" in command and "printf" in command)
+    guest = tmp_path / "guest"
+    (guest / "package/bin").mkdir(parents=True)
+    (guest / "package/bin/ara").write_text("#!/bin/sh\nenv\n")
+    (guest / "package/bin/ara").chmod(0o755)
+    subprocess.run(["/bin/sh", "-c", write.replace(remote, str(guest))], check=True)
+    image = {"PATH": "/usr/local/bin:/usr/bin:/bin", "BUN_RUNTIME_TRANSPILER_CACHE_PATH": "0",
+             "BUN_INSTALL_BIN": "/usr/local/bin", "BUN_INSTALL": "/root/.bun", "NODE_DEBUG": "net",
+             "DYLD_INSERT_LIBRARIES": "/x", "HTTPS_PROXY": "http://proxy", "GOPATH": "/go",
+             "MULTILINE": "first\nBUN_NOT_A_VARIABLE x=1\nlast"}
+    seen = subprocess.run([str(guest / "ara-clean")], env=image, check=True,
+                          capture_output=True, text=True).stdout
+    names = {line.split("=", 1)[0] for line in seen.splitlines() if "=" in line}
+    assert {"PATH", "GOPATH", "BUN_INSTALL", "MULTILINE"} <= names
+    assert not names & {"BUN_RUNTIME_TRANSPILER_CACHE_PATH", "BUN_INSTALL_BIN", "NODE_DEBUG",
+                        "DYLD_INSERT_LIBRARIES", "HTTPS_PROXY"}

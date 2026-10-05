@@ -33,7 +33,7 @@ class AdapterRuntimeConfig:
 
     worker_start_timeout_sec: int = 180
     # The enrolled worker Device must outlive the whole run: an expiring lease
-    # starts handing the run off and ends it as pi_run_unsettled. The trial
+    # starts handing the run off and ends it as run_unsettled. The trial
     # deadline is not passed to the agent, so request the server's ephemeral
     # maximum (24 h); cleanup revokes the Device on every normal exit.
     worker_device_ttl_sec: int = 86_400
@@ -42,6 +42,9 @@ class AdapterRuntimeConfig:
     worker_slots: int = 1
 
     event_page_size: int = 500
+    # Longest pause between Session-capacity retries (the parent's active
+    # ephemeral-workspace cap); the trial deadline bounds the whole wait.
+    capacity_wait_max_sec: float = 60.0
     uncertain_session_recovery_attempts: int = 2
 
     # Harbor and Pier compute the trial deadline but do not pass it to the

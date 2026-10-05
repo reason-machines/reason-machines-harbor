@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import secrets
 import shlex
@@ -48,24 +49,65 @@ SESSION_MODES = {"standard", "ephemeral"}
 # Terminal-Bench (freecad-*, vba-userform-port) print an activation banner as root.
 # Every parsed command first prints this marker, and only what follows it is output.
 GUEST_OUTPUT_MARKER = "__reason_guest_output__"
-# Requested and attested as experimental_runtime_profile. Requestable before the
+# Requested as experimental_runtime_profile. Requestable before the
 # deployment offers one: preflight refuses a profile the deployment does not
 # advertise for this credential's organization (an ephemeral trial's parent).
-PI_C2_TOOLS_V7_RUNTIME_PROFILE = "runtime/ara-pi-c2-tools-v7"
+C2_TOOLS_V7_RUNTIME_PROFILE = "runtime/reason-c2-tools-v7"
+# The earlier name of the same harness. Still accepted from a config, but sent
+# under the name above so the server can stop advertising it.
+LEGACY_C2_TOOLS_V7_RUNTIME_PROFILE = "runtime/ara-pi-c2-tools-v7"
 REASON_V7_SYNC_YIELD_RUNTIME_PROFILE = "runtime/reason-v7-sync-yield-v1"
 # Reason's SDK as `reason-sdk` on the machine: the server runs it in ephemeral mode only.
 REASON_V7_SYNC_YIELD_MACHINE_SDK_RUNTIME_PROFILE = "runtime/reason-v7-sync-yield-machine-sdk-v1"
-RUNTIME_PROFILES = {PI_C2_TOOLS_V7_RUNTIME_PROFILE, REASON_V7_SYNC_YIELD_RUNTIME_PROFILE,
-                    REASON_V7_SYNC_YIELD_MACHINE_SDK_RUNTIME_PROFILE}
+# v7's prompt evaluation profiles (stock Pi 1.0's first request; v7 plus a Reason
+# docs section): v7 in every other respect, ephemeral mode only.
+REASON_V7_STOCK_PROMPT_RUNTIME_PROFILE = "runtime/reason-v7-stock-prompt-v1"
+REASON_V7_DOCS_RUNTIME_PROFILE = "runtime/reason-v7-docs-v1"
+V7_RUNTIME_PROFILES = {C2_TOOLS_V7_RUNTIME_PROFILE, REASON_V7_STOCK_PROMPT_RUNTIME_PROFILE,
+                       REASON_V7_DOCS_RUNTIME_PROFILE}
+EPHEMERAL_ONLY_RUNTIME_PROFILES = {REASON_V7_SYNC_YIELD_MACHINE_SDK_RUNTIME_PROFILE,
+                                   REASON_V7_STOCK_PROMPT_RUNTIME_PROFILE, REASON_V7_DOCS_RUNTIME_PROFILE}
+RUNTIME_PROFILES = {REASON_V7_SYNC_YIELD_RUNTIME_PROFILE, *V7_RUNTIME_PROFILES, *EPHEMERAL_ONLY_RUNTIME_PROFILES}
+# Requested as experimental_runtime_features: the Reason features an ephemeral v7
+# Session runs on top of stock Pi 1.0. An empty list is stock's shape; None sends
+# nothing, so the deployment's default set runs. Preflight refuses features the
+# deployment does not advertise: one that predates the field would ignore it.
+RUNTIME_FEATURES = ("banner", "sdk_index", "service_tier", "output_cap", "git_metadata", "serial_reads")
 WORKSPACE_OWNERSHIP = "externally-managed"
 # Public headless Sessions install a private environment before attaching Hands.
 REQUIRED_WORKER_CAPABILITIES = ("hands.connect", "environment.install")
-COMPONENTS = ("memoryRead", "memoryWrite", "skills", "inheritedInstructions", "integrations", "secretInjection")
 FAILURE_METRICS = ("worker_startup_timeout", "resource_loss", "suspended_session", "artifact_failure")
 ORIGINS = {
     "staging": "https://staging-api.reasonmachines.com",
     "production": "https://api.reasonmachines.com",
 }
+# The worker refuses to start with any variable cli/device-broker-environment.ts
+# treats as unsafe (exit 78), and its host shell drops them from the task anyway.
+# Task images set some: oven/bun sets BUN_RUNTIME_TRANSPILER_CACHE_PATH.
+_UNSAFE_WORKER_ENV = ("ALL_PROXY", "BUN_BE_BUN", "BUN_OPTIONS", "CURL_CA_BUNDLE", "GIT_SSL_CAINFO",
+                      "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+                      "NODE_EXTRA_CA_CERTS", "NODE_OPTIONS", "NODE_TLS_REJECT_UNAUTHORIZED", "REQUESTS_CA_BUNDLE",
+                      "SSLKEYLOGFILE", "SSL_CERT_DIR", "SSL_CERT_FILE", "all_proxy", "http_proxy", "https_proxy",
+                      "no_proxy")
+
+
+def _clean_worker_wrapper(binary: str) -> str:
+    """A sh script that runs the worker without the environment it refuses."""
+    unset = " ".join(f"-u {name}" for name in _UNSAFE_WORKER_ENV)
+    # The here-document keeps the loop in this shell. A multi-line value yields
+    # lines that are not names; `unset` on one would abort a POSIX shell.
+    return ("#!/bin/sh\n"
+            "while IFS== read -r name value; do\n"
+            "  case $name in\n"
+            "    *[!A-Za-z0-9_]* | BUN_INSTALL) ;;\n"
+            "    BUN_* | DYLD_* | NODE_DEBUG*) unset \"$name\" ;;\n"
+            "  esac\n"
+            "done <<EOF\n"
+            "$(env)\n"
+            "EOF\n"
+            f"exec env {unset} {shlex.quote(binary)} \"$@\"\n")
+
+
 # The relay serves the same sessions on its reasonmachines.com domain and its
 # Railway host. The worker opts in (REASON_RELAY_CUSTOM_DOMAIN) to the custom
 # domain; the API hands out the Railway host until its alias is configured,
@@ -76,7 +118,8 @@ RELAY_HOSTS = {
 }
 
 SAFE_API_ERRORS = frozenset({
-    "resource_unavailable", "pi_cancelled",
+    # pi_cancelled is the spelling servers reported before the run_ rename.
+    "resource_unavailable", "run_cancelled", "pi_cancelled",
     "quota_exhausted", "group_max_runs_per_day", "group_spend_limit_exceeded",
     "invalid_request", "invalid_model", "invalid_reasoning_effort", "missing_scope",
     "unauthorized", "forbidden", "invalid_api_key", "api_key_expired", "api_key_revoked",
@@ -103,6 +146,18 @@ class Sandbox(Protocol):
     async def exec(self, command: str, timeout_sec: int | None = None) -> Any: ...
 
     async def upload_file(self, source_path: Path, target_path: str) -> Any: ...
+
+
+def parse_runtime_features(value: str | list[str] | tuple[str, ...] | None) -> list[str] | None:
+    """Comma-separated (as Harbor's --ak passes it) or a list; "" is the explicit empty list."""
+    if value is None:
+        return None
+    names = value.split(",") if isinstance(value, str) else list(value)
+    requested = {str(name).strip().lower() for name in names} - {""}
+    unknown = requested - set(RUNTIME_FEATURES)
+    if unknown:
+        raise ValueError(f"unsupported runtime_features: {', '.join(sorted(unknown))}")
+    return [feature for feature in RUNTIME_FEATURES if feature in requested]
 
 
 def _pr_origin(value: str | None, environment: str) -> str:
@@ -228,6 +283,7 @@ class ReasonDriver:
                  reasoning_effort: str = "medium",
                  mode: str = "ephemeral",
                  runtime_profile: str | None = None,
+                 runtime_features: str | list[str] | tuple[str, ...] | None = None,
                  ephemeral_rcus: str | None = None,
                  mcp_servers: list[Any] | None = None, skills_dir: str | None = None,
                  extra_env: dict[str, str] | None = None, load_trajectory: Any = None):
@@ -246,11 +302,16 @@ class ReasonDriver:
         if ephemeral_rcus is not None and not re.fullmatch(r"\d{1,3}(\.\d{1,9})?", str(ephemeral_rcus)):
             raise ValueError("ephemeral_rcus must be a decimal RCU amount")
         self.ephemeral_rcus = None if ephemeral_rcus is None else str(ephemeral_rcus)
+        if runtime_profile == LEGACY_C2_TOOLS_V7_RUNTIME_PROFILE:
+            runtime_profile = C2_TOOLS_V7_RUNTIME_PROFILE
         if runtime_profile is not None and runtime_profile not in RUNTIME_PROFILES:
             raise ValueError("unsupported runtime_profile")
-        if runtime_profile == REASON_V7_SYNC_YIELD_MACHINE_SDK_RUNTIME_PROFILE and mode != "ephemeral":
-            raise ValueError("machine-sdk runtime_profile requires ephemeral mode")
+        if runtime_profile in EPHEMERAL_ONLY_RUNTIME_PROFILES and mode != "ephemeral":
+            raise ValueError(f"runtime_profile {runtime_profile} requires ephemeral mode")
         self.runtime_profile = runtime_profile
+        self.runtime_features = parse_runtime_features(runtime_features)
+        if self.runtime_features is not None and (runtime_profile not in V7_RUNTIME_PROFILES or mode != "ephemeral"):
+            raise ValueError(f"runtime_features requires runtime_profile {C2_TOOLS_V7_RUNTIME_PROFILE} (or a v7 prompt evaluation profile) in ephemeral mode")
         if channel is None:
             channel = os.environ.get("REASON_CHANNEL")
             if not channel:
@@ -440,11 +501,18 @@ class ReasonDriver:
             not isinstance(runtime_profiles, list) or self.runtime_profile not in runtime_profiles
         ):
             raise RuntimeError("deployment does not advertise the requested runtime profile; refusing enrollment")
+        runtime_features = deployment.get("experimental_runtime_features")
+        if self.runtime_features is not None and (
+            not isinstance(runtime_features, list) or not set(self.runtime_features) <= set(runtime_features)
+        ):
+            raise RuntimeError("deployment does not advertise the requested runtime features; refusing enrollment")
         # Project only the authenticated non-secret deployment contract.
         receipt = {"mode": self.mode, "workspace_ownership": WORKSPACE_OWNERSHIP, "channel": self.channel,
                    **self._pr_receipt()}
         if self.runtime_profile is not None:
             receipt["runtime_profile"] = self.runtime_profile
+        if self.runtime_features is not None:
+            receipt["runtime_features"] = self.runtime_features
         for field in ("service", "environment", "commit_sha", "artifact_sha", "deployment_id", "checked_at"):
             value = deployment.get(field)
             if value is None or isinstance(value, (str, bool)):
@@ -453,21 +521,6 @@ class ReasonDriver:
         self.org = await resolve_organization(
             self._request_api, self.ephemeral_org if self.mode == "ephemeral" else self.expected_org,
         )
-
-    def _attest_policy(self, session, *, require_runtime_profile=True):
-        """Require the server's resolved policy, not just an echoed mode request."""
-        policy = session.get("session_policy")
-        components = policy.get("components") if isinstance(policy, dict) else None
-        if (not isinstance(policy, dict) or type(policy.get("version")) is not int
-                or policy["version"] != 1 or policy.get("mode") != self.mode
-                or policy.get("workspaceOwnership") != WORKSPACE_OWNERSHIP
-                or not isinstance(components, dict) or set(components) != set(COMPONENTS)
-                or any(components[name] is not True for name in COMPONENTS)):
-            raise RuntimeError("server did not attest the requested Session component policy and workspace ownership")
-        if (require_runtime_profile and self.runtime_profile is not None
-                and session.get("experimental_runtime_profile") != self.runtime_profile):
-            raise RuntimeError("server did not attest the requested runtime profile")
-        return policy
 
     def _session_request(self, instruction: str, root_id: str) -> dict:
         body = {
@@ -479,13 +532,15 @@ class ReasonDriver:
             "target": {"kind": "headless", "device_id": self.device_id,
                        "root_id": root_id, "workspace_mode": "project_root"},
         }
-        if self.runtime_profile == PI_C2_TOOLS_V7_RUNTIME_PROFILE:
+        if self.runtime_profile in V7_RUNTIME_PROFILES:
             # v7 shows the model the trial's working directory (the image
             # WORKDIR, or `pwd -P` without one; see setup) as its cwd. Other
             # profiles keep main's request bytes.
             body["target"]["workspace_path"] = self.workspace
         if self.runtime_profile is not None:
             body["experimental_runtime_profile"] = self.runtime_profile
+        if self.runtime_features is not None:
+            body["experimental_runtime_features"] = self.runtime_features
         return body
 
     def _task_prompt(self, instruction: str) -> str:
@@ -541,7 +596,11 @@ class ReasonDriver:
             args.extend(["--runtime-profile", self.runtime_profile])
         if self.mode != "standard":
             args.extend(["--mode", self.mode])
-        return shlex.join(args)
+        command = shlex.join(args)
+        # The CLI has no flag for these; the API request carried them.
+        if self.runtime_features is not None:
+            command += f"  # experimental_runtime_features={','.join(self.runtime_features)}"
+        return command
 
     async def _api(self, method: str, suffix: str, body=None):
         response = await self._request_api(method, f"/v3/organizations/{quote(self.org, safe='')}/{suffix}", body)
@@ -639,10 +698,25 @@ class ReasonDriver:
             partial(self._request_api, client=self.parent_client), self.expected_org,
         )
         reference = f"{self.label}-{self.trial_key}"
-        created = await self._ephemeral_api("POST", "", {
+        body = {
             "reference": reference, "ttl_minutes": DEFAULT_RUNTIME_CONFIG.ephemeral_workspace_ttl_minutes,
             **({"rcus": self.ephemeral_rcus} if self.ephemeral_rcus is not None else {}),
-        }, "ephemeral-workspace-create")
+        }
+        waits = 0
+        while True:
+            try:
+                created = await self._ephemeral_api("POST", "", body, "ephemeral-workspace-create")
+                break
+            except ReasonAPIError as error:
+                # The parent's active-workspace cap is capacity, not a failure: wait
+                # for another trial to retire its workspace. No workspace exists yet,
+                # and the framework's trial deadline cancels this wait.
+                if error.status != 409 or error.code != "ephemeral_workspace_limit_reached":
+                    raise
+                waits += 1
+                delay = min(DEFAULT_RUNTIME_CONFIG.capacity_wait_max_sec, 5 * 2 ** min(waits, 6)) * random.uniform(0.5, 1)
+                self._retry_diagnostic("ephemeral-workspace-capacity", error, waits, delay)
+                await asyncio.sleep(delay)
         created = created if isinstance(created, dict) else {}
         self.ephemeral_org = resource_id(created.get("organization_id"))
         key = created.get("api_key")
@@ -892,8 +966,8 @@ class ReasonDriver:
                 await environment.upload_file(source_path=archive, target_path=f"{self.remote}/worker.tgz")
             await self._exec(environment, f"tar -xzf {self.remote}/worker.tgz -C {self.remote} && test -x {self.binary}")
             wrapper = f"{self.remote}/ara-clean"
-            clean_cmd = f"printf '#!/bin/sh\nexec env -u ALL_PROXY -u BUN_BE_BUN -u BUN_OPTIONS -u CURL_CA_BUNDLE -u GIT_SSL_CAINFO -u GRPC_DEFAULT_SSL_ROOTS_FILE_PATH -u HTTPS_PROXY -u HTTP_PROXY -u NO_PROXY -u NODE_EXTRA_CA_CERTS -u NODE_OPTIONS -u NODE_TLS_REJECT_UNAUTHORIZED -u REQUESTS_CA_BUNDLE -u SSLKEYLOGFILE -u SSL_CERT_DIR -u SSL_CERT_FILE -u all_proxy -u http_proxy -u https_proxy -u no_proxy {shlex.quote(self.binary)} \"$@\"\n' > {shlex.quote(wrapper)} && chmod 0755 {shlex.quote(wrapper)}"
-            await self._exec(environment, clean_cmd)
+            await self._exec(environment, f"printf %s {shlex.quote(_clean_worker_wrapper(self.binary))} > {shlex.quote(wrapper)} "
+                                          f"&& chmod 0755 {shlex.quote(wrapper)}")
             self.binary = wrapper
             self.cli_version = (await self._exec(environment, f"{self.binary} --version")).strip()
             if self.docker_host_api and not egress_proxy:
@@ -1118,7 +1192,7 @@ class ReasonDriver:
         if isinstance(error, ReasonSessionResourceUnavailableError) or session.get("error_class") == "resource_unavailable":
             failure_class = "resource_loss"
             metrics["resource_loss"] = True
-        elif session.get("status") == "suspended" or session.get("error_class") == "pi_cancelled":
+        elif session.get("status") == "suspended" or session.get("error_class") in ("run_cancelled", "pi_cancelled"):
             failure_class = "suspended_session"
             metrics["suspended_session"] = True
         elif isinstance(error, ReasonWorkerStartupError) and "timed out" in str(error).lower():
@@ -1272,25 +1346,33 @@ class ReasonDriver:
                             raise self._format_model_credential_error(error) from error
                         raise
                     self.ara_session_id = created["session_id"]
-                    session = created
-                    if self.runtime_profile is not None:
-                        # Attest the profile on the canonical Session read, not the create echo.
-                        session = await self._api("GET", f"sessions/{quote(self.ara_session_id, safe='')}")
-                    policy = self._attest_policy(session)
                     context.metadata = {"stage": "session_poll",
                                         "failure_metrics": {name: False for name in FAILURE_METRICS},
                                         "worker_status_retry_count": 0,
                                         "session_id": self.ara_session_id, "device_id": self.device_id,
                                         "org_id": self.org,
-                                        "session_policy": policy, "channel": self.channel,
+                                        "channel": self.channel,
                                         "cli_sha256": self.archive_sha, "cli_version": self.cli_version,
                                         "reasoning_effort": self.reasoning_effort}
                     if self.runtime_profile is not None:
                         context.metadata["runtime_profile"] = self.runtime_profile
+                    if self.runtime_features is not None:
+                        context.metadata["runtime_features"] = self.runtime_features
+                    # Recorded, not enforced: the deployment's advertised profiles and
+                    # modes were checked in preflight, and a rolling deploy may change
+                    # how a live Session reports them without changing what it runs.
+                    context.metadata["session_policy"] = created.get("session_policy")
+                    context.metadata["server_experimental_runtime_profile"] = created.get("experimental_runtime_profile")
+                    context.metadata["server_experimental_runtime_features"] = created.get("experimental_runtime_features")
                     if self.mode == "ephemeral":
                         context.metadata["parent_org_id"] = self.parent_org
                     context.metadata.update(self._pr_receipt())
                     self._save("receipt.json", context.metadata)
+                    # Enforced, unlike the fields above: a replica that predates the
+                    # field ignores it, so its Session runs another configuration.
+                    # Cleanup cancels it; the framework may retry the trial.
+                    if self.runtime_features is not None and created.get("experimental_runtime_features") != self.runtime_features:
+                        raise RuntimeError("the Session did not record the requested runtime features; refusing to run another configuration")
                     cursor = -1
                     poll_failures = 0
                     retry_delay = max(1.0, self.poll_interval)
@@ -1314,7 +1396,6 @@ class ReasonDriver:
                         poll_failures = 0
                         retry_delay = max(1.0, self.poll_interval)
                         session = event_batch["session"]
-                        self._attest_policy(session, require_runtime_profile=False)
                         items = event_batch["items"]
                         if items:
                             with (self.logs_dir / "events.jsonl").open("a") as events:
@@ -1336,13 +1417,6 @@ class ReasonDriver:
                                 self._save("trajectory.json", trajectory)
                             except Exception as traj_err:
                                 self.logger.debug(f"Failed to fetch session trajectory: {traj_err}")
-                            if self.runtime_profile is not None:
-                                # Polling snapshots omit the profile, and a continuation can
-                                # re-admit a Session to another profile after create; score a
-                                # trial only if its ended Session record still names its profile.
-                                self._attest_policy(await self._api(
-                                    "GET", f"sessions/{quote(self.ara_session_id, safe='')}",
-                                ))
                             if session["status"] != "exit":
                                 if session["status"] == "error" and session.get("error_class") == "resource_unavailable":
                                     raise ReasonSessionResourceUnavailableError(
