@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from reasonmachines_harbor import ReasonAgent, image_runtime
+from reasonmachines_harbor._driver import driver as driver_module
 from reasonmachines_harbor._driver.driver import C2_TOOLS_V7_RUNTIME_PROFILE
 
 GO_PATH = "/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -146,3 +147,49 @@ def test_worker_wrapper_drops_environment_the_worker_refuses(tmp_path, monkeypat
     assert {"PATH", "GOPATH", "BUN_INSTALL", "MULTILINE"} <= names
     assert not names & {"BUN_RUNTIME_TRANSPILER_CACHE_PATH", "BUN_INSTALL_BIN", "NODE_DEBUG",
                         "DYLD_INSERT_LIBRARIES", "HTTPS_PROXY"}
+
+
+PARENT_ORG = "11111111-1111-4111-8111-111111111111"
+CHILD_ORG = "22222222-2222-4222-8222-222222222222"
+
+
+def ephemeral_create_body(driver, monkeypatch):
+    sent = {}
+    async def organization(request_api, expected):
+        return PARENT_ORG
+    async def ephemeral_api(method, suffix, body, stage):
+        sent.update(body)
+        return {"organization_id": CHILD_ORG, "parent_organization_id": PARENT_ORG,
+                "reference": body["reference"], "api_key": "child-key"}
+    monkeypatch.setattr(driver_module, "resolve_organization", organization)
+    driver._ephemeral_api = ephemeral_api
+    asyncio.run(driver._create_ephemeral_workspace())
+    return sent
+
+
+@pytest.mark.parametrize("task_toml, deadline_min, ttl_min, rcus", [
+    # Terminal-Bench: 8 h for the agent.
+    ("[agent]\ntimeout_sec = 28800.0\n", 490, 510, "82"),
+    # DeepSWE: 1.5 h; the workspace keeps its 240-minute floor and the default budget.
+    ("[agent]\ntimeout_sec = 5400\n", 100, 240, "30"),
+    # Beyond the server's 12 h credential ceiling, the deadline stays just under it.
+    ("[agent]\ntimeout_sec = 86400\n", 719, 720, "120"),
+    # No limit in task.toml: 170 minutes, as before, and the server's default budget.
+    ("[verifier]\ntimeout_sec = 600\n", 170, 240, None),
+    (None, 170, 240, None),
+])
+def test_session_deadline_follows_the_task_agent_time_limit(tmp_path, monkeypatch, task_toml, deadline_min, ttl_min, rcus):
+    monkeypatch.setattr(image_runtime, "registry_config", lambda image: IMAGE_CONFIG)
+    reason = agent(tmp_path, monkeypatch)
+    environment = FakeE2BEnvironment(tmp_path)
+    environment.environment_dir = tmp_path / "environment"
+    if task_toml is not None:
+        (tmp_path / "task.toml").write_text(task_toml)
+    asyncio.run(reason.setup(environment))
+    driver = reason.driver
+
+    request = driver._session_request("task", "root")
+    assert request["execution_budget"] == {"wall_clock_max_ms": deadline_min * 60_000}
+    body = ephemeral_create_body(driver, monkeypatch)
+    assert body["ttl_minutes"] == ttl_min
+    assert body.get("rcus") == rcus

@@ -11,6 +11,9 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class AdapterRuntimeConfig:
+    # Session event polling: the API has no event stream for API keys, so a
+    # Session's end is seen up to one interval late. Each poll costs ~8 DB
+    # statements; at 100 concurrent trials 1 s polling would add ~550/s.
     poll_interval_sec: float = 3.0
     poll_interval_max_sec: float = 30.0
 
@@ -38,6 +41,9 @@ class AdapterRuntimeConfig:
     # maximum (24 h); cleanup revokes the Device on every normal exit.
     worker_device_ttl_sec: int = 86_400
     worker_status_timeout_sec: int = 60
+    # Worker startup readiness (guest `worker status`, then Device online) is
+    # usually reached within seconds; a short interval sees it promptly.
+    worker_readiness_poll_interval_sec: float = 0.5
     worker_shutdown_grace_ms: int = 10_000
     worker_slots: int = 1
 
@@ -47,14 +53,24 @@ class AdapterRuntimeConfig:
     capacity_wait_max_sec: float = 60.0
     uncertain_session_recovery_attempts: int = 2
 
-    # Harbor and Pier compute the trial deadline but do not pass it to the
-    # agent, so the server default is used: it covers typical task + verifier
-    # budgets, and cleanup retires the workspace earlier on every normal exit.
-    ephemeral_workspace_ttl_minutes: int = 240
     # A Session with no deadline on worker Hands gets no Reason capability plane
-    # (memory, skills, MCP): its run token (3 h) cannot cover an unbounded
-    # turn. Every Session requests a deadline the token covers.
-    capability_session_wall_clock_max_ms: int = 170 * 60 * 1000
+    # (memory, skills, MCP), so every Session requests one: the task's own agent
+    # time limit plus a margin, so the framework's timeout fires first and grades
+    # the attempt as it stands. The server covers deadlines up to 12 h with the
+    # plane's credential; a task with no known limit gets 170 minutes.
+    session_deadline_margin_sec: int = 600
+    session_wall_clock_max_ms: int = (12 * 60 - 1) * 60 * 1000
+    default_session_wall_clock_max_ms: int = 170 * 60 * 1000
+    # The ephemeral workspace outlives the Session by a margin; cleanup retires
+    # it, before grading, on every normal exit. The server allows 720 minutes.
+    ephemeral_workspace_ttl_margin_minutes: int = 20
+    ephemeral_workspace_ttl_minutes: int = 240
+    ephemeral_workspace_max_ttl_minutes: int = 720
+    # The workspace budget is held on the parent's wallet and charged for actual
+    # use. It scales with the Session deadline between the server default and cap.
+    ephemeral_rcus_per_hour: int = 10
+    ephemeral_rcus_default: int = 30
+    ephemeral_rcus_max: int = 300
 
 
 DEFAULT_RUNTIME_CONFIG = AdapterRuntimeConfig()

@@ -6,6 +6,7 @@ from .driver import (
     ReasonSessionResourceUnavailableError,
     ReasonSessionTerminalError,
     Sandbox,
+    task_agent_timeout_sec,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "ReasonSessionResourceUnavailableError",
     "ReasonSessionTerminalError",
     "Sandbox",
+    "task_agent_timeout_sec",
 ]

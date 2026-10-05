@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
-from ._driver import DEFAULT_RUNTIME_CONFIG, ReasonDriver
+from ._driver import DEFAULT_RUNTIME_CONFIG, ReasonDriver, task_agent_timeout_sec
 from ._driver.driver import ReasonWorkerStartupError
 
 from .docker_dns import prepare_control_plane_dns
@@ -50,7 +50,7 @@ class ReasonAgent(BaseAgent):
         return "reason"
 
     def version(self) -> str:
-        return "0.3.7"
+        return "0.3.9"
 
     async def setup(self, environment: BaseEnvironment) -> None:
         mode = getattr(getattr(environment, "network_policy", None), "network_mode", "")
@@ -66,7 +66,8 @@ class ReasonAgent(BaseAgent):
             except TimeoutError:
                 raise ReasonWorkerStartupError("Reason worker setup timed out") from None
         image_env, workdir = await resolve_image_runtime(environment, self.logger)
-        await driver.setup(environment, image_env=image_env, workdir=workdir)
+        await driver.setup(environment, image_env=image_env, workdir=workdir,
+                           agent_timeout_sec=task_agent_timeout_sec(getattr(environment, "environment_dir", None)))
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         await self.driver.run(instruction, environment, context)

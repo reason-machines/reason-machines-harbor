@@ -21,6 +21,7 @@ import shlex
 import sys
 import tempfile
 import time
+import tomllib
 from contextlib import asynccontextmanager
 from email.utils import parsedate_to_datetime
 from functools import partial
@@ -259,6 +260,25 @@ class ReasonAPIError(RuntimeError):
         return error
 
 
+def task_agent_timeout_sec(environment_dir: Path | str | None) -> float | None:
+    """The agent time limit from the task's task.toml (`[agent] timeout_sec`), if set.
+
+    Harbor and Pier enforce it but do not pass it to the agent. The task's
+    environment directory sits beside its task.toml.
+    """
+    if environment_dir is None:
+        return None
+    try:
+        with (Path(environment_dir).parent / "task.toml").open("rb") as file:
+            agent = tomllib.load(file).get("agent")
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    value = agent.get("timeout_sec") if isinstance(agent, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < math.inf:
+        return None
+    return float(value)
+
+
 class ReasonDriver:
     """One benchmark trial: install, enroll and start a worker, then run one Session.
 
@@ -442,6 +462,8 @@ class ReasonDriver:
         self.client: httpx.AsyncClient | None = None
         self.workspace = ""
         self.image_env: dict[str, str] = {}
+        self.agent_timeout_sec: float | None = None
+        self.session_wall_clock_max_ms = DEFAULT_RUNTIME_CONFIG.default_session_wall_clock_max_ms
         self.cli_version = "unknown"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -485,7 +507,15 @@ class ReasonDriver:
 
     async def _preflight(self):
         assert self.client is not None
-        response = await self._request_api("GET", "/v3/deployment")
+        # Independent reads, sent together. A refused deployment is still
+        # reported first, and enrollment still waits for both.
+        response, org = await asyncio.gather(
+            self._request_api("GET", "/v3/deployment"),
+            resolve_organization(self._request_api, self.ephemeral_org if self.mode == "ephemeral" else self.expected_org),
+            return_exceptions=True,
+        )
+        if isinstance(response, BaseException):
+            raise response
         deployment = response.json()
         if self.channel == "pr" and (
             not isinstance(deployment, dict) or deployment.get("environment") != self.pr_environment
@@ -518,15 +548,15 @@ class ReasonDriver:
             if value is None or isinstance(value, (str, bool)):
                 receipt[field] = value
         self._save("deployment.json", receipt)
-        self.org = await resolve_organization(
-            self._request_api, self.ephemeral_org if self.mode == "ephemeral" else self.expected_org,
-        )
+        if isinstance(org, BaseException):
+            raise org
+        self.org = org
 
     def _session_request(self, instruction: str, root_id: str) -> dict:
         body = {
             "prompt": instruction, "model": self.model_name,
             "reasoning_effort": self.reasoning_effort,
-            "execution_budget": {"wall_clock_max_ms": DEFAULT_RUNTIME_CONFIG.capability_session_wall_clock_max_ms},
+            "execution_budget": {"wall_clock_max_ms": self.session_wall_clock_max_ms},
             "idempotency_key": f"{self.label}-{self.trial_key}", "completion_mode": "run_outcome",
             "mode": self.mode, "workspace_ownership": WORKSPACE_OWNERSHIP,
             "target": {"kind": "headless", "device_id": self.device_id,
@@ -698,9 +728,18 @@ class ReasonDriver:
             partial(self._request_api, client=self.parent_client), self.expected_org,
         )
         reference = f"{self.label}-{self.trial_key}"
+        config = DEFAULT_RUNTIME_CONFIG
+        session_minutes = math.ceil(self.session_wall_clock_max_ms / 60_000)
+        ttl_minutes = min(config.ephemeral_workspace_max_ttl_minutes,
+                          max(config.ephemeral_workspace_ttl_minutes,
+                              session_minutes + config.ephemeral_workspace_ttl_margin_minutes))
+        rcus = self.ephemeral_rcus
+        if rcus is None and self.agent_timeout_sec is not None:
+            rcus = str(min(config.ephemeral_rcus_max, max(
+                config.ephemeral_rcus_default, math.ceil(session_minutes / 60 * config.ephemeral_rcus_per_hour))))
         body = {
-            "reference": reference, "ttl_minutes": DEFAULT_RUNTIME_CONFIG.ephemeral_workspace_ttl_minutes,
-            **({"rcus": self.ephemeral_rcus} if self.ephemeral_rcus is not None else {}),
+            "reference": reference, "ttl_minutes": ttl_minutes,
+            **({"rcus": rcus} if rcus is not None else {}),
         }
         waits = 0
         while True:
@@ -901,15 +940,24 @@ class ReasonDriver:
                                                  "tools": versions, "checksum_tool": checksum})
 
     async def setup(self, sandbox: Sandbox, *, egress_proxy: str | None = None,
-                    image_env: dict[str, str] | None = None, workdir: str | None = None) -> None:
+                    image_env: dict[str, str] | None = None, workdir: str | None = None,
+                    agent_timeout_sec: float | None = None) -> None:
         """Install the worker. `egress_proxy` is the guest's HTTP(S) proxy URL, if any.
 
         `image_env` and `workdir` are the task image's ENV and WORKDIR. Guests
         such as E2B sandboxes do not apply the image config to exec shells, so
         the worker (and through it every Hands shell) starts with them
         explicitly. Without them the exec shell's environment and `pwd -P` stand.
+        `agent_timeout_sec` is the task's agent time limit; the Session deadline
+        follows it (see AdapterRuntimeConfig).
         """
         self.image_env = dict(image_env or {})
+        self.agent_timeout_sec = agent_timeout_sec
+        if agent_timeout_sec is not None:
+            self.session_wall_clock_max_ms = min(
+                DEFAULT_RUNTIME_CONFIG.session_wall_clock_max_ms,
+                math.ceil((agent_timeout_sec + DEFAULT_RUNTIME_CONFIG.session_deadline_margin_sec) * 1000),
+            )
         try:
             await self._setup(sandbox, egress_proxy, workdir)
         except (TimeoutError, httpx.TimeoutException):
@@ -1061,6 +1109,7 @@ class ReasonDriver:
                          f"--enrollment-file {self.remote}/enrollment.json "
                          f">{self.remote}/worker.log 2>&1 </dev/null & }}")
         deadline = time.monotonic() + DEFAULT_RUNTIME_CONFIG.worker_start_timeout_sec
+        interval = DEFAULT_RUNTIME_CONFIG.worker_readiness_poll_interval_sec
         status_retries = []
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
@@ -1078,7 +1127,7 @@ class ReasonDriver:
                     "error_type": type(error).__name__,
                 })
                 self._save("worker-status-retry.json", {"attempts": status_retries})
-                await asyncio.sleep(min(self.poll_interval, max(0, deadline - time.monotonic())))
+                await asyncio.sleep(min(interval, max(0, deadline - time.monotonic())))
                 continue
             if result.return_code != 0:
                 diagnostic = self._diagnostic((result.stdout or "") + "\n" + (result.stderr or ""))
@@ -1091,12 +1140,12 @@ class ReasonDriver:
                              "worker_state_directory_not_private_or_canonical"}
                 if permanent.intersection(diagnostic["worker_codes"]):
                     raise ReasonWorkerStartupError("worker status rejected: " + json.dumps(diagnostic))
-                await asyncio.sleep(self.poll_interval)
+                await asyncio.sleep(interval)
                 continue
             try:
                 status = json.loads(result.stdout or "")
             except ValueError:
-                await asyncio.sleep(self.poll_interval)
+                await asyncio.sleep(interval)
                 continue
             if status.get("deviceId"):
                 self.device_id = status["deviceId"]
@@ -1140,7 +1189,7 @@ class ReasonDriver:
                     "cli_sha256": self.archive_sha,
                 })
                 if device.get("online") is False and reason == "offline":
-                    await asyncio.sleep(self.poll_interval)
+                    await asyncio.sleep(interval)
                     continue
                 if device.get("online") is not True or not compatible:
                     guidance = (" Install an official CLI archive compatible with the target API "
@@ -1152,7 +1201,7 @@ class ReasonDriver:
                 # Keep the one-use enrollment until the controller accepts this Device.
                 await self._exec(env, f"rm -f {self.remote}/enrollment.json")
                 return roots[0]["id"]
-            await asyncio.sleep(self.poll_interval)
+            await asyncio.sleep(interval)
         raise ReasonWorkerStartupError(
             "worker did not become execution eligible within "
             f"{DEFAULT_RUNTIME_CONFIG.worker_start_timeout_sec:g} seconds"
@@ -1255,22 +1304,39 @@ class ReasonDriver:
             )
         except Exception:
             failures.append("worker stop failed")
-        if self.device_id:
+
+        # Revoke only after the stop: a worker revoked first exits on its own,
+        # and its stop then fails with worker_revoked_or_expired. The Device
+        # revocation uses the child key, so it precedes the workspace retirement
+        # that ends that key. These API calls run while the guest state is
+        # removed; both finish before cleanup returns.
+        async def revoke_device_and_retire_workspace():
+            errors = []
+            if self.device_id:
+                try:
+                    await self._cleanup_api("DELETE", f"devices/{quote(self.device_id, safe='')}")
+                except Exception:
+                    errors.append("Device revocation failed")
+            return errors, (await self._retire_ephemeral_workspace() if self.ephemeral_org else None)
+
+        async def remove_guest_state():
             try:
-                await self._cleanup_api("DELETE", f"devices/{quote(self.device_id, safe='')}")
+                await self._exec(
+                    env,
+                    f"rm -rf {self.remote}",
+                    timeout=DEFAULT_RUNTIME_CONFIG.cleanup_timeout_sec,
+                )
             except Exception:
-                failures.append("Device revocation failed")
-        try:
-            await self._exec(
-                env,
-                f"rm -rf {self.remote}",
-                timeout=DEFAULT_RUNTIME_CONFIG.cleanup_timeout_sec,
-            )
-        except Exception:
-            failures.append("guest state removal failed")
+                return ["guest state removal failed"]
+            return []
+
+        (revoke_errors, retired), guest_errors = await asyncio.gather(
+            revoke_device_and_retire_workspace(), remove_guest_state(),
+        )
+        failures += revoke_errors + guest_errors
         receipt = {"session_id": self.ara_session_id, "device_id": self.device_id, "errors": failures}
-        if self.ephemeral_org:
-            receipt["ephemeral_workspace"] = await self._retire_ephemeral_workspace()
+        if retired is not None:
+            receipt["ephemeral_workspace"] = retired
         self._save("cleanup.json", receipt)
         if failures:
             raise RuntimeError("; ".join(failures))

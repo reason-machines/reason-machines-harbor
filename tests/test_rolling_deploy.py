@@ -100,7 +100,7 @@ class Server:
 
 
 def run_trial(tmp_path, monkeypatch, capacity_rejections, runtime_features=None, advertised_features=None,
-              records_features=True, server=None, runtime_profile=PROFILE):
+              records_features=True, server=None, runtime_profile=PROFILE, guest=Guest, **options):
     data = io.BytesIO()
     with tarfile.open(fileobj=data, mode="w:gz") as bundle:
         bundle.addfile(tarfile.TarInfo("package/bin/ara"), io.BytesIO(b""))
@@ -124,12 +124,12 @@ def run_trial(tmp_path, monkeypatch, capacity_rejections, runtime_features=None,
     monkeypatch.setattr(driver_module.asyncio, "sleep", sleep)
     agent = ReasonAgent(logs_dir=tmp_path / "logs", model_name="openai/gpt-6-luna", runtime_profile=runtime_profile,
                         runtime_features=runtime_features, cli_archive_path=str(archive),
-                        cli_archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest())
+                        cli_archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest(), **options)
     context = SimpleNamespace(metadata=None, n_input_tokens=None, n_output_tokens=None, cost_usd=None)
 
     async def trial():
-        await agent.driver.setup(Guest())
-        await agent.driver.run("Explain the repository.", Guest(), context)
+        await agent.driver.setup(guest())
+        await agent.driver.run("Explain the repository.", guest(), context)
 
     asyncio.run(trial())
     return server, context, sleeps
