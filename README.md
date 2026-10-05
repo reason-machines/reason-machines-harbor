@@ -3,9 +3,9 @@
 Run [Reason](https://reasonmachines.ai) as an agent in
 [Harbor](https://harborframework.com). Harbor starts the task container and
 grades the result. The adapter installs the published Reason CLI in that
-container, after checking its published checksum, and starts it as a worker.
-The agent runs as a normal Reason Session. Your API key stays on your machine;
-the container only receives a one-use enrollment ticket.
+container, checks its checksum, and starts it as a worker; the agent runs as a
+normal Reason Session. Your API key stays on your machine; the container only
+receives a one-use enrollment ticket.
 
 ## Install
 
@@ -13,20 +13,19 @@ the container only receives a one-use enrollment ticket.
 uv pip install reason-machines-harbor
 ```
 
-This also installs Harbor 0.22.0. For cloud environments such as Modal or
-E2B, also install the matching Harbor extra, for example
-`uv pip install "harbor[modal]==0.22.0"`.
+This installs Harbor 0.22.0. For cloud environments, add the matching Harbor
+extra, for example `uv pip install "harbor[modal]==0.22.0"`.
 
 ## Run
 
 Get a [Reason API key](https://reasonmachines.ai/customize?tab=api) with
-`run`, `sessions:read`, `deployment:read`, `devices:read`, `devices:write` and
-`devices:use`, and enable the model under
+`run`, `sessions:read`, `deployment:read`, `devices:read`, `devices:write`,
+`devices:use` and `org:write`, and enable the model under
 [Models](https://reasonmachines.ai/customize?tab=models).
 
 ```bash
 export REASON_API_KEY="YOUR_REASON_API_KEY"
-DOCKER_DEFAULT_PLATFORM=linux/amd64 .venv/bin/harbor run \
+DOCKER_DEFAULT_PLATFORM=linux/amd64 harbor run \
   --dataset datacurve/deep-swe-1-1 --n-tasks 1 \
   --agent reasonmachines_harbor:ReasonAgent \
   --model openai/gpt-6-luna \
@@ -36,20 +35,23 @@ DOCKER_DEFAULT_PLATFORM=linux/amd64 .venv/bin/harbor run \
   --env reasonmachines_harbor.environment:ReasonDockerEnvironment
 ```
 
-Both `--allow-agent-host` flags are required: the worker connects out to the
-Reason API and relay, even for tasks that otherwise run without internet. Use
-`reason-machines-harbor` 0.3.2 or later for these hostnames.
+The worker connects out to the Reason API and relay, so both
+`--allow-agent-host` flags are required, even for offline tasks.
 
 | Agent kwarg (`--ak`) | Default | Meaning |
 |---|---|---|
 | `reasoning_effort` | `medium` | `minimal`, `low`, `medium`, `high`, `xhigh` or `max` |
-| `mode` | `isolated` | `isolated`: memory, skills and integrations off. `ephemeral`: a new single-use workspace per trial, with memory and skills on (needs enabling for your workspace). `standard`: your own workspace |
+| `mode` | `ephemeral` | `ephemeral`: a new single-use workspace per trial, with memory and skills on. `standard`: your own workspace |
+| `runtime_profile` | server default | An experimental harness listed by `GET /v3/deployment` |
+
+Ephemeral mode has to be enabled for your workspace; ask us, or pass
+`--ak mode=standard`.
 
 To run the full benchmarks and reproduce our results, see
 [reason-machines/benchmark](https://github.com/reason-machines/benchmark).
 
 ## Source
 
-This repository is a read-only copy of `packages/reason-machines-harbor` in
-the Reason monorepo, where the adapter is developed and tested. `sync.sh`
-refreshes it from a monorepo checkout. Each release is tagged `vX.Y.Z`.
+[reason-machines/reason-machines-harbor](https://github.com/reason-machines/reason-machines-harbor)
+is a read-only copy of the adapter in the Reason monorepo, where it is
+developed and tested. Releases are tagged `vX.Y.Z`.
