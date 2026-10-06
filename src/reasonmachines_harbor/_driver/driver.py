@@ -145,8 +145,10 @@ SAFE_API_ERRORS = frozenset({
     "ephemeral_workspace_limit_reached", "ephemeral_workspace_key_unavailable",
     "ephemeral_workspace_parent_payment_required", "ephemeral_workspace_parent_credit_exhausted", "ephemeral_workspace_required",
     "ephemeral_workspace_mode_required", "ephemeral_workspace_idempotency_key_required",
-    "ephemeral_requires_external_workspace", "ephemeral_workspace_consumed",
+    "ephemeral_requires_external_workspace", "ephemeral_workspace_consumed", "hands_lost",
 })
+# The server's tool result when the task machine is gone (hands-tool-runtime.ts handsLostOutput).
+HANDS_LOST_OUTPUT = re.compile(r"The machine running this Session (?:is unavailable|stopped responding) \(")
 
 
 class Sandbox(Protocol):
@@ -201,7 +203,7 @@ class ReasonSessionTerminalError(RuntimeError):
     """A bounded, framework-visible terminal Session failure."""
 
     def __init__(self, *, status: object, error_class: object = None, reason_code: object = None):
-        self.status = status if status in {"error", "cancelled", "suspended"} else "unknown"
+        self.status = status if status in {"exit", "error", "cancelled", "suspended"} else "unknown"
         self.error_class = _public_session_code(error_class)
         self.reason_code = _public_session_code(reason_code)
         details = [f"status={self.status}"]
@@ -1499,6 +1501,7 @@ class ReasonDriver:
                     if self.runtime_features is not None and created.get("experimental_runtime_features") != self.runtime_features:
                         raise RuntimeError("the Session did not record the requested runtime features; refusing to run another configuration")
                     cursor = -1
+                    last_tool_result = ""
                     poll_failures = 0
                     retry_delay = max(1.0, self.poll_interval)
                     while True:
@@ -1526,6 +1529,8 @@ class ReasonDriver:
                             with (self.logs_dir / "events.jsonl").open("a") as events:
                                 for item in items:
                                     events.write(json.dumps(item) + "\n")
+                                    if item.get("type") == "tool_result":
+                                        last_tool_result = str((item.get("data") or {}).get("content") or item.get("text") or "")
                             (self.logs_dir / "events.jsonl").chmod(0o600)
                             cursor = event_batch["next_seq"]
                         self._save("session.json", session)
@@ -1552,6 +1557,11 @@ class ReasonDriver:
                                     error_class=session.get("error_class"),
                                     reason_code=session.get("reason_code"),
                                 )
+                            # The task machine was lost and no tool ran after it: the agent
+                            # stopped for the infrastructure, so grading it would score the
+                            # outage. The framework retries a resource loss instead.
+                            if HANDS_LOST_OUTPUT.search(last_tool_result):
+                                raise ReasonSessionResourceUnavailableError(status="exit", reason_code="hands_lost")
                             break
                         await asyncio.sleep(self.poll_interval)
                 self.populate_context(context)
