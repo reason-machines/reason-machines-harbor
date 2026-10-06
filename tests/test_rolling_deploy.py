@@ -35,6 +35,8 @@ class Guest:
             stdout = "1.2.3\n"
         elif "worker status" in command:
             stdout = json.dumps(STATUS)
+        elif "worker.pid" in command and "kill" in command:
+            stdout = "exited\n"
         else:
             stdout = ""
         return SimpleNamespace(return_code=0, stdout=("__reason_guest_output__\n" if marked else "") + stdout, stderr="")
@@ -100,7 +102,8 @@ class Server:
 
 
 def run_trial(tmp_path, monkeypatch, capacity_rejections, runtime_features=None, advertised_features=None,
-              records_features=True, server=None, runtime_profile=PROFILE, guest=Guest, **options):
+              records_features=True, server=None, runtime_profile=PROFILE, guest=Guest, agent_network_mode=None,
+              **options):
     data = io.BytesIO()
     with tarfile.open(fileobj=data, mode="w:gz") as bundle:
         bundle.addfile(tarfile.TarInfo("package/bin/ara"), io.BytesIO(b""))
@@ -129,7 +132,7 @@ def run_trial(tmp_path, monkeypatch, capacity_rejections, runtime_features=None,
 
     async def trial():
         await agent.driver.setup(guest())
-        await agent.driver.run("Explain the repository.", guest(), context)
+        await agent.driver.run("Explain the repository.", guest(), context, agent_network_mode=agent_network_mode)
 
     asyncio.run(trial())
     return server, context, sleeps
@@ -206,8 +209,8 @@ def test_a_session_created_by_a_replica_that_ignored_the_features_is_cancelled(t
 
 @pytest.mark.parametrize(("kwargs", "error"), [
     ({"runtime_profile": PROFILE, "runtime_features": "sdk_index,checkpoints"}, "unsupported runtime_features: checkpoints"),
-    ({"runtime_features": "sdk_index"}, "requires runtime_profile"),
-    ({"runtime_profile": PROFILE, "runtime_features": "sdk_index", "mode": "standard"}, "requires runtime_profile"),
+    ({"runtime_profile": "runtime/reason-v7-sync-yield-v1", "runtime_features": "sdk_index"}, "requires ephemeral mode and the default harness"),
+    ({"runtime_profile": PROFILE, "runtime_features": "sdk_index", "mode": "standard"}, "requires ephemeral mode and the default harness"),
 ])
 def test_runtime_features_are_checked_before_any_request(tmp_path, monkeypatch, kwargs, error):
     monkeypatch.setenv("REASON_API_KEY", "parent-key")

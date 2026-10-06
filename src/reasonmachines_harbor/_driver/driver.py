@@ -64,16 +64,27 @@ REASON_V7_SYNC_YIELD_MACHINE_SDK_RUNTIME_PROFILE = "runtime/reason-v7-sync-yield
 # docs section): v7 in every other respect, ephemeral mode only.
 REASON_V7_STOCK_PROMPT_RUNTIME_PROFILE = "runtime/reason-v7-stock-prompt-v1"
 REASON_V7_DOCS_RUNTIME_PROFILE = "runtime/reason-v7-docs-v1"
+# v7 plus stock's docs section and codemode `models` line naming Reason's docs (reason:/docs/).
+REASON_V7_STOCK_SHAPE_RUNTIME_PROFILE = "runtime/reason-v7-stock-shape-v1"
 V7_RUNTIME_PROFILES = {C2_TOOLS_V7_RUNTIME_PROFILE, REASON_V7_STOCK_PROMPT_RUNTIME_PROFILE,
-                       REASON_V7_DOCS_RUNTIME_PROFILE}
+                       REASON_V7_DOCS_RUNTIME_PROFILE, REASON_V7_STOCK_SHAPE_RUNTIME_PROFILE}
 EPHEMERAL_ONLY_RUNTIME_PROFILES = {REASON_V7_SYNC_YIELD_MACHINE_SDK_RUNTIME_PROFILE,
-                                   REASON_V7_STOCK_PROMPT_RUNTIME_PROFILE, REASON_V7_DOCS_RUNTIME_PROFILE}
+                                   REASON_V7_STOCK_PROMPT_RUNTIME_PROFILE, REASON_V7_DOCS_RUNTIME_PROFILE,
+                                   REASON_V7_STOCK_SHAPE_RUNTIME_PROFILE}
 RUNTIME_PROFILES = {REASON_V7_SYNC_YIELD_RUNTIME_PROFILE, *V7_RUNTIME_PROFILES, *EPHEMERAL_ONLY_RUNTIME_PROFILES}
 # Requested as experimental_runtime_features: the Reason features an ephemeral v7
 # Session runs on top of stock Pi 1.0. An empty list is stock's shape; None sends
 # nothing, so the deployment's default set runs. Preflight refuses features the
 # deployment does not advertise: one that predates the field would ignore it.
-RUNTIME_FEATURES = ("banner", "sdk_index", "service_tier", "output_cap", "git_metadata", "serial_reads")
+# recovery_defer_idle_hands is an opt-in recovery experiment, never a default.
+RUNTIME_FEATURES = ("banner", "sdk_index", "service_tier", "output_cap", "git_metadata", "serial_reads",
+                    "recovery_defer_idle_hands")
+# sdk_index puts Reason's tools in codemode, and they include web_search and
+# web_fetch, which run in Reason's cloud and so bypass the task's network policy.
+# An offline task (agent phase not public: DeepSWE) that names no features gets
+# this list instead of the deployment default, as Artificial Analysis disables
+# provider-hosted search and browsing to keep such tasks offline.
+OFFLINE_TASK_RUNTIME_FEATURES: list[str] = []
 WORKSPACE_OWNERSHIP = "externally-managed"
 # Public headless Sessions install a private environment before attaching Hands.
 REQUIRED_WORKER_CAPABILITIES = ("hands.connect", "environment.install")
@@ -130,7 +141,7 @@ SAFE_API_ERRORS = frozenset({
     "agent_model_key_missing", "local_device_incompatible", "idempotency_profile_conflict", "idempotency_target_conflict",
     "benchmark_profile_requires_headless_project_root", "benchmark_profile_requires_fresh_session",
     "prompt_required", "prompt_too_large", "request_too_large", "rate_limit_exceeded", "instruction_blocked",
-    "ephemeral_workspaces_not_enabled", "ephemeral_workspace_reference_conflict", "ephemeral_workspace_retired",
+    "ephemeral_workspace_reference_conflict", "ephemeral_workspace_retired",
     "ephemeral_workspace_limit_reached", "ephemeral_workspace_key_unavailable",
     "ephemeral_workspace_parent_payment_required", "ephemeral_workspace_parent_credit_exhausted", "ephemeral_workspace_required",
     "ephemeral_workspace_mode_required", "ephemeral_workspace_idempotency_key_required",
@@ -330,8 +341,10 @@ class ReasonDriver:
             raise ValueError(f"runtime_profile {runtime_profile} requires ephemeral mode")
         self.runtime_profile = runtime_profile
         self.runtime_features = parse_runtime_features(runtime_features)
-        if self.runtime_features is not None and (runtime_profile not in V7_RUNTIME_PROFILES or mode != "ephemeral"):
-            raise ValueError(f"runtime_features requires runtime_profile {C2_TOOLS_V7_RUNTIME_PROFILE} (or a v7 prompt evaluation profile) in ephemeral mode")
+        if self.runtime_features is not None and not self._features_apply():
+            raise ValueError(f"runtime_features requires ephemeral mode and the default harness ({C2_TOOLS_V7_RUNTIME_PROFILE}) or a v7 prompt evaluation profile")
+        # Why runtime_features was sent: "requested" (configured) or "offline_task".
+        self.runtime_features_source = None if self.runtime_features is None else "requested"
         if channel is None:
             channel = os.environ.get("REASON_CHANNEL")
             if not channel:
@@ -463,9 +476,23 @@ class ReasonDriver:
         self.workspace = ""
         self.image_env: dict[str, str] = {}
         self.agent_timeout_sec: float | None = None
+        # The framework's agent-phase network mode ("public", "allowlist", "no-network").
+        self.agent_network_mode: str | None = None
         self.session_wall_clock_max_ms = DEFAULT_RUNTIME_CONFIG.default_session_wall_clock_max_ms
         self.cli_version = "unknown"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+
+    def _features_apply(self) -> bool:
+        """Only an ephemeral Session of the default harness or a v7 profile reads runtime features."""
+        return self.mode == "ephemeral" and (self.runtime_profile is None or self.runtime_profile in V7_RUNTIME_PROFILES)
+
+    def _apply_agent_network(self, agent_network_mode: str | None) -> None:
+        """An offline task runs without Reason's cloud-side web tools unless features were named."""
+        self.agent_network_mode = agent_network_mode
+        if (agent_network_mode not in (None, "public") and self.runtime_features is None
+                and self._features_apply()):
+            self.runtime_features = list(OFFLINE_TASK_RUNTIME_FEATURES)
+            self.runtime_features_source = "offline_task"
 
     def _format_model_credential_error(self, error: ReasonAPIError) -> ReasonAPIError:
         if self.channel == "pr":
@@ -543,6 +570,7 @@ class ReasonDriver:
             receipt["runtime_profile"] = self.runtime_profile
         if self.runtime_features is not None:
             receipt["runtime_features"] = self.runtime_features
+            receipt["runtime_features_source"] = self.runtime_features_source
         for field in ("service", "environment", "commit_sha", "artifact_sha", "deployment_id", "checked_at"):
             value = deployment.get(field)
             if value is None or isinstance(value, (str, bool)):
@@ -1107,7 +1135,7 @@ class ReasonDriver:
         await self._exec(env, f"cd {shlex.quote(self.workspace)} && {{ nohup env{image_env} REASON_RELAY_CUSTOM_DOMAIN=1 "
                          f"{self.binary} worker start --config {self.config_path} "
                          f"--enrollment-file {self.remote}/enrollment.json "
-                         f">{self.remote}/worker.log 2>&1 </dev/null & }}")
+                         f">{self.remote}/worker.log 2>&1 </dev/null & echo $! >{self.remote}/worker.pid; }}")
         deadline = time.monotonic() + DEFAULT_RUNTIME_CONFIG.worker_start_timeout_sec
         interval = DEFAULT_RUNTIME_CONFIG.worker_readiness_poll_interval_sec
         status_retries = []
@@ -1263,6 +1291,26 @@ class ReasonDriver:
         context.metadata = metadata
         self._save("failure.json", failure)
 
+    async def _await_worker_exit(self, env) -> str:
+        """Wait out the worker's shutdown grace, then kill it: "exited", "forced",
+        "not_started" (no pid recorded), "alive" or "unknown" (the check failed)."""
+        grace = math.ceil(DEFAULT_RUNTIME_CONFIG.worker_shutdown_grace_ms / 1000) + 5
+        pid_file = shlex.quote(f"{self.remote}/worker.pid")
+        # A worker reparented to a PID 1 that never reaps stays a zombie, which
+        # `kill -0` still finds: a zombie has exited.
+        script = (f"p=$(cat {pid_file} 2>/dev/null); case $p in ''|*[!0-9]*) echo not_started; exit 0;; esac; "
+                  "gone() { ! kill -0 \"$p\" 2>/dev/null || [ \"$(sed -n 's/.*) \\(.\\).*/\\1/p' /proc/$p/stat 2>/dev/null)\" = Z ]; }; "
+                  f"i=0; while [ $i -lt {grace} ]; do gone && {{ echo exited; exit 0; }}; sleep 1; i=$((i+1)); done; "
+                  "kill -9 \"$p\" 2>/dev/null; sleep 1; gone && echo forced || echo alive")
+        try:
+            result = await self._guest_exec(env, script, grace + 10)
+        except Exception:
+            return "unknown"
+        if getattr(result, "return_code", 1) != 0:
+            return "unknown"
+        status = (getattr(result, "stdout", "") or "").strip().splitlines()
+        return status[-1] if status and status[-1] in ("exited", "forced", "not_started", "alive") else "unknown"
+
     async def _cleanup(self, env):
         failures = []
         await self._capture_worker_diagnostics(env)
@@ -1304,6 +1352,11 @@ class ReasonDriver:
             )
         except Exception:
             failures.append("worker stop failed")
+        # `worker stop` only asks; the worker can keep running for its shutdown
+        # grace. It must be gone before the framework grades in this container.
+        worker_exit = await self._await_worker_exit(env)
+        if worker_exit not in ("exited", "forced", "not_started"):
+            failures.append(f"worker did not exit ({worker_exit})")
 
         # Revoke only after the stop: a worker revoked first exits on its own,
         # and its stop then fails with worker_revoked_or_expired. The Device
@@ -1334,16 +1387,19 @@ class ReasonDriver:
             revoke_device_and_retire_workspace(), remove_guest_state(),
         )
         failures += revoke_errors + guest_errors
-        receipt = {"session_id": self.ara_session_id, "device_id": self.device_id, "errors": failures}
+        receipt = {"session_id": self.ara_session_id, "device_id": self.device_id, "worker_exit": worker_exit,
+                   "errors": failures}
         if retired is not None:
             receipt["ephemeral_workspace"] = retired
         self._save("cleanup.json", receipt)
         if failures:
             raise RuntimeError("; ".join(failures))
 
-    async def run(self, instruction: str, environment: Sandbox, context: Any) -> None:
+    async def run(self, instruction: str, environment: Sandbox, context: Any,
+                  agent_network_mode: str | None = None) -> None:
         if not self.workspace:
             raise RuntimeError("setup must run before run")
+        self._apply_agent_network(agent_network_mode)
         if self.mode != "ephemeral":
             return await self._run(instruction, environment, context, self.key)
         async with httpx.AsyncClient(
@@ -1424,6 +1480,9 @@ class ReasonDriver:
                         context.metadata["runtime_profile"] = self.runtime_profile
                     if self.runtime_features is not None:
                         context.metadata["runtime_features"] = self.runtime_features
+                        context.metadata["runtime_features_source"] = self.runtime_features_source
+                    if self.agent_network_mode is not None:
+                        context.metadata["agent_network_mode"] = self.agent_network_mode
                     # Recorded, not enforced: the deployment's advertised profiles and
                     # modes were checked in preflight, and a rolling deploy may change
                     # how a live Session reports them without changing what it runs.

@@ -88,8 +88,9 @@ def test_worker_starts_in_image_workdir_with_image_env(tmp_path, monkeypatch):
     start = shlex.split(asyncio.run(start_worker(driver, environment)))
     assert start[:5] == ["cd", "/app", "&&", "{", "nohup"]
     assert start[5] == "env"
-    # Only the redirected worker is backgrounded, so the exec returns at once.
-    assert start[-2:] == ["&", "}"]
+    # Only the redirected worker is backgrounded, so the exec returns at once;
+    # its pid is kept so cleanup can wait for it to exit.
+    assert start[-5:] == ["&", "echo", "$!", f">{driver.remote}/worker.pid;", "}"]
     assert f"PATH={GO_PATH}" in start
     assert "GOPATH=/go" in start and "GOMODCACHE=/go/pkg/mod" in start
     # The environment's own task/trial values stay above the image's.

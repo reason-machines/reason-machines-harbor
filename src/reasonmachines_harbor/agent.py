@@ -50,13 +50,9 @@ class ReasonAgent(BaseAgent):
         return "reason"
 
     def version(self) -> str:
-        return "0.3.9"
+        return "0.3.11"
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        mode = getattr(getattr(environment, "network_policy", None), "network_mode", "")
-        mode = str(getattr(mode, "value", mode))
-        if mode.endswith("no_network"):
-            raise ValueError("connected worker requires Reason egress; offline tasks are not supported")
         driver = self.driver
         api_host = urlparse(driver.worker_api_origin).hostname
         # Local qualification must remain independent of public control-plane DNS.
@@ -70,7 +66,16 @@ class ReasonAgent(BaseAgent):
                            agent_timeout_sec=task_agent_timeout_sec(getattr(environment, "environment_dir", None)))
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
-        await self.driver.run(instruction, environment, context)
+        # Harbor switches to the agent phase's policy around run(), not setup().
+        mode = getattr(getattr(environment, "network_policy", None), "network_mode", None)
+        mode = None if mode is None else str(getattr(mode, "value", mode))
+        if mode == "no-network":
+            hosts = " ".join(f"--allow-agent-host {host}" for host in self._reason_hosts())
+            raise ValueError(f"the worker needs Reason egress on this offline task: run Harbor with {hosts}")
+        await self.driver.run(instruction, environment, context, agent_network_mode=mode)
+
+    def _reason_hosts(self) -> list[str]:
+        return [host for host in (urlparse(self.driver.worker_api_origin).hostname, *self.driver.relay_hosts()[:1]) if host]
 
     def populate_context_post_run(self, context: AgentContext) -> None:
         self.driver.populate_context(context)
