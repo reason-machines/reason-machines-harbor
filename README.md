@@ -44,8 +44,10 @@ The worker connects out to the Reason API and relay, so both
 | `mode` | `ephemeral` | `ephemeral`: a new single-use workspace per trial, with memory and skills on. `standard`: your own workspace |
 | `runtime_profile` | server default | An experimental harness listed by `GET /v3/deployment` |
 
-Ephemeral mode has to be enabled for your workspace; ask us, or pass
-`--ak mode=standard`.
+Ephemeral mode needs an owner or admin key of a workspace with paid model
+access. To bill the model to your own provider account, connect its API key
+under [Models](https://reasonmachines.ai/customize?tab=models) and pass the
+model as `byok:<provider>:<model>`, for example `byok:openai:gpt-6-luna`.
 
 To run the full benchmarks and reproduce our results, see
 [reason-machines/benchmark](https://github.com/reason-machines/benchmark).
