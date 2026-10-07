@@ -13,7 +13,9 @@ import pytest
 
 from reasonmachines_harbor import ReasonAgent, image_runtime
 from reasonmachines_harbor._driver import driver as driver_module
-from reasonmachines_harbor._driver.driver import C2_TOOLS_V7_RUNTIME_PROFILE
+from reasonmachines_harbor._driver.driver import (C2_TOOLS_V7_RUNTIME_PROFILE,
+                                                  REASON_V7_SYNC_YIELD_MACHINE_SDK_RUNTIME_PROFILE,
+                                                  REASON_V7_SYNC_YIELD_RUNTIME_PROFILE)
 
 GO_PATH = "/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 IMAGE_CONFIG = {"Env": [f"PATH={GO_PATH}", "GOPATH=/go", "GOMODCACHE=/go/pkg/mod", "TASK_VALUE=image"],
@@ -85,6 +87,11 @@ def test_worker_starts_in_image_workdir_with_image_env(tmp_path, monkeypatch):
 
     assert driver.workspace == "/app"
     assert driver._session_request("task", "root")["target"]["workspace_path"] == "/app"
+    for profile in (REASON_V7_SYNC_YIELD_RUNTIME_PROFILE, REASON_V7_SYNC_YIELD_MACHINE_SDK_RUNTIME_PROFILE):
+        driver.runtime_profile = profile
+        assert driver._session_request("task", "root")["target"]["workspace_path"] == "/app"
+    driver.runtime_profile = None
+    assert "workspace_path" not in driver._session_request("task", "root")["target"]
     start = shlex.split(asyncio.run(start_worker(driver, environment)))
     assert start[:5] == ["cd", "/app", "&&", "{", "nohup"]
     assert start[5] == "env"
@@ -111,18 +118,43 @@ def test_dockerfile_task_uses_base_image_config_and_own_env(tmp_path, monkeypatc
     assert workdir == "/app"
 
 
-def test_unavailable_image_config_keeps_exec_shell_and_logs(tmp_path, monkeypatch, caplog):
+def test_unavailable_image_config_fails_the_trial_before_the_worker_starts(tmp_path, monkeypatch):
+    # Running without the image's PATH and toolchain would grade the model on a broken
+    # task; the error is an infrastructure failure that Harbor retries.
     def unavailable(image):
         raise OSError("registry unreachable")
     monkeypatch.setattr(image_runtime, "registry_config", unavailable)
     reason = agent(tmp_path, monkeypatch)
     environment = FakeE2BEnvironment(tmp_path)
-    with caplog.at_level(logging.WARNING):
+    with pytest.raises(image_runtime.ImageConfigUnavailableError, match="registry unreachable"):
         asyncio.run(reason.setup(environment))
-    assert "Task image config unavailable" in caplog.text
-    assert reason.driver.workspace == "/root"
-    start = asyncio.run(start_worker(reason.driver, environment))
-    assert start.startswith("cd /root && { nohup env REASON_RELAY_CUSTOM_DOMAIN=1 /tmp/")
+    assert not any("worker" in command for command in environment.commands)
+
+
+def test_e2b_sandbox_gets_the_image_env_below_task_values(tmp_path, monkeypatch):
+    from harbor.environments.e2b import E2BEnvironment
+    from reasonmachines_harbor.environment import ReasonE2BEnvironment
+
+    monkeypatch.setattr(image_runtime, "registry_config", lambda image: IMAGE_CONFIG)
+    monkeypatch.setattr(E2BEnvironment, "_startup_env", lambda self: {"TASK_VALUE": "task"})
+    started = []
+
+    async def start(self, force_build):
+        started.append(self._startup_env())
+    monkeypatch.setattr(E2BEnvironment, "start", start)
+    environment = ReasonE2BEnvironment.__new__(ReasonE2BEnvironment)
+    environment.task_env_config = SimpleNamespace(docker_image="ghcr.io/scaleapi/swe-atlas:task", workdir=None)
+    environment.environment_dir = tmp_path
+    asyncio.run(environment.start(force_build=False))
+    assert started == [{"PATH": GO_PATH, "GOPATH": "/go", "GOMODCACHE": "/go/pkg/mod", "TASK_VALUE": "task"}]
+
+    monkeypatch.setattr(image_runtime, "registry_config", lambda image: (_ for _ in ()).throw(OSError("429")))
+    environment = ReasonE2BEnvironment.__new__(ReasonE2BEnvironment)
+    environment.task_env_config = SimpleNamespace(docker_image="ghcr.io/scaleapi/swe-atlas:task", workdir=None)
+    environment.environment_dir = tmp_path
+    with pytest.raises(image_runtime.ImageConfigUnavailableError):
+        asyncio.run(environment.start(force_build=False))
+    assert len(started) == 1
 
 
 def test_worker_wrapper_drops_environment_the_worker_refuses(tmp_path, monkeypatch):

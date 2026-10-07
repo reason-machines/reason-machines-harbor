@@ -72,6 +72,8 @@ EPHEMERAL_ONLY_RUNTIME_PROFILES = {REASON_V7_SYNC_YIELD_MACHINE_SDK_RUNTIME_PROF
                                    REASON_V7_STOCK_PROMPT_RUNTIME_PROFILE, REASON_V7_DOCS_RUNTIME_PROFILE,
                                    REASON_V7_STOCK_SHAPE_RUNTIME_PROFILE}
 RUNTIME_PROFILES = {REASON_V7_SYNC_YIELD_RUNTIME_PROFILE, *V7_RUNTIME_PROFILES, *EPHEMERAL_ONLY_RUNTIME_PROFILES}
+WORKSPACE_PATH_RUNTIME_PROFILES = {*V7_RUNTIME_PROFILES, REASON_V7_SYNC_YIELD_RUNTIME_PROFILE,
+                                   REASON_V7_SYNC_YIELD_MACHINE_SDK_RUNTIME_PROFILE}
 # Requested as experimental_runtime_features: the Reason features an ephemeral v7
 # Session runs on top of stock Pi 1.0. An empty list is stock's shape; None sends
 # nothing, so the deployment's default set runs. Preflight refuses features the
@@ -592,10 +594,10 @@ class ReasonDriver:
             "target": {"kind": "headless", "device_id": self.device_id,
                        "root_id": root_id, "workspace_mode": "project_root"},
         }
-        if self.runtime_profile in V7_RUNTIME_PROFILES:
-            # v7 shows the model the trial's working directory (the image
-            # WORKDIR, or `pwd -P` without one; see setup) as its cwd. Other
-            # profiles keep main's request bytes.
+        if self.runtime_profile in WORKSPACE_PATH_RUNTIME_PROFILES:
+            # v7 and sync-yield are told the trial's working directory (the
+            # image WORKDIR, or `pwd -P` without one; see setup) as the model's
+            # cwd. Other profiles keep main's request bytes.
             body["target"]["workspace_path"] = self.workspace
         if self.runtime_profile is not None:
             body["experimental_runtime_profile"] = self.runtime_profile
@@ -1504,6 +1506,8 @@ class ReasonDriver:
                     last_tool_result = ""
                     poll_failures = 0
                     retry_delay = max(1.0, self.poll_interval)
+                    poll_delay = self.poll_interval
+                    idle_poll_delay_max = max(self.poll_interval, DEFAULT_RUNTIME_CONFIG.poll_idle_interval_max_sec)
                     while True:
                         try:
                             event_batch = await self._api(
@@ -1533,6 +1537,7 @@ class ReasonDriver:
                                         last_tool_result = str((item.get("data") or {}).get("content") or item.get("text") or "")
                             (self.logs_dir / "events.jsonl").chmod(0o600)
                             cursor = event_batch["next_seq"]
+                            poll_delay = self.poll_interval
                         self._save("session.json", session)
                         context.n_input_tokens = (session.get("usage") or {}).get("input_tokens")
                         context.n_output_tokens = (session.get("usage") or {}).get("output_tokens")
@@ -1563,7 +1568,10 @@ class ReasonDriver:
                             if HANDS_LOST_OUTPUT.search(last_tool_result):
                                 raise ReasonSessionResourceUnavailableError(status="exit", reason_code="hands_lost")
                             break
-                        await asyncio.sleep(self.poll_interval)
+                        # Each poll that brings no new items doubles the next wait, up
+                        # to the idle cap; any new item resets it to the base interval.
+                        await asyncio.sleep(poll_delay)
+                        poll_delay = min(idle_poll_delay_max, poll_delay * 2)
                 self.populate_context(context)
                 context.metadata["stage"] = "complete"
             finally:

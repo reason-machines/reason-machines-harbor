@@ -10,6 +10,7 @@ from ._driver import DEFAULT_RUNTIME_CONFIG, ReasonDriver, task_agent_timeout_se
 from ._driver.driver import ReasonWorkerStartupError
 
 from .docker_dns import prepare_control_plane_dns
+from .git_snapshot import snapshot_command, write_snapshot
 from .image_runtime import resolve_image_runtime
 
 
@@ -50,7 +51,7 @@ class ReasonAgent(BaseAgent):
         return "reason"
 
     def version(self) -> str:
-        return "0.3.12"
+        return "0.3.15"
 
     async def setup(self, environment: BaseEnvironment) -> None:
         driver = self.driver
@@ -72,7 +73,21 @@ class ReasonAgent(BaseAgent):
         if mode == "no-network":
             hosts = " ".join(f"--allow-agent-host {host}" for host in self._reason_hosts())
             raise ValueError(f"the worker needs Reason egress on this offline task: run Harbor with {hosts}")
-        await self.driver.run(instruction, environment, context, agent_network_mode=mode)
+        # The task repo at the start and end of the agent phase (also on errors
+        # and the agent timeout), before the verifier, for the AA tracked-file rule.
+        await self._snapshot_git(environment, "start")
+        try:
+            await self.driver.run(instruction, environment, context, agent_network_mode=mode)
+        finally:
+            await self._snapshot_git(environment, "end")
+
+    async def _snapshot_git(self, environment: BaseEnvironment, phase: str) -> None:
+        try:
+            # Read-only and exits 0. The parse skips a login shell's banner before the first section.
+            result = await environment.exec(snapshot_command(self.driver.workspace), timeout_sec=120)
+            write_snapshot(self.logs_dir, phase, result.stdout or "")
+        except Exception as error:
+            self.logger.warning(f"git {phase} snapshot failed: {error}")
 
     def _reason_hosts(self) -> list[str]:
         return [host for host in (urlparse(self.driver.worker_api_origin).hostname, *self.driver.relay_hosts()[:1]) if host]

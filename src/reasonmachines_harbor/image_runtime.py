@@ -6,15 +6,27 @@ neither the image config's ENV nor its WORKDIR: PATH loses entries such as
 image registry (anonymously, linux/amd64), as the stock Pi adapter's E2B
 environment does. A Dockerfile task uses its FROM image's config plus its own
 ENV and WORKDIR lines. Docker applies the config natively and is skipped.
+
+Registries rate-limit anonymous reads (Docker Hub answers 429 under benchmark
+concurrency), so each image's config is cached on disk for every process of a
+run, a 429 or 5xx is retried with backoff, and DOCKERHUB_USERNAME with
+DOCKERHUB_TOKEN authenticates Docker Hub reads. A config that still cannot be
+read raises: running a task without its image ENV silently drops its toolchain.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
+import os
 import re
+import tempfile
+import time
 import urllib.error
 import urllib.request
 from functools import cache
+from pathlib import Path
 
 from harbor.environments.docker.docker import DockerEnvironment
 
@@ -41,12 +53,35 @@ def split_reference(image: str) -> tuple[str, str, str]:
     return host, repository, digest or reference
 
 
-def _get(url: str, token: str | None, accept: str | None = None) -> bytes:
+CACHE_DIR = Path(os.environ.get("REASON_HARBOR_IMAGE_CONFIG_CACHE")
+                 or Path.home() / ".cache" / "reason-machines-harbor" / "image-config")
+CACHE_TTL_SEC = 24 * 3600
+RETRY_DELAYS_SEC = (2, 5, 10, 20, 40, 60)
+
+
+def _get(url: str, token: str | None, accept: str | None = None, basic: str | None = None) -> bytes:
     headers = {"Accept": accept} if accept else {}
     if token:
         headers["Authorization"] = "Bearer " + token
-    with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as response:
-        return response.read()
+    elif basic:
+        headers["Authorization"] = "Basic " + basic
+    for delay in (*RETRY_DELAYS_SEC, None):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as response:
+                return response.read()
+        except urllib.error.HTTPError as error:
+            if delay is None or (error.code != 429 and error.code < 500):
+                raise
+            retry_after = error.headers.get("Retry-After", "")
+            time.sleep(min(int(retry_after), 120) if retry_after.isdigit() else delay)
+    raise AssertionError("unreachable")
+
+
+def _dockerhub_basic(host: str) -> str | None:
+    user, token = os.environ.get("DOCKERHUB_USERNAME"), os.environ.get("DOCKERHUB_TOKEN")
+    if host != "registry-1.docker.io" or not user or not token:
+        return None
+    return base64.b64encode(f"{user}:{token}".encode()).decode()
 
 
 def _token(host: str, repository: str) -> str | None:
@@ -59,13 +94,28 @@ def _token(host: str, repository: str) -> str | None:
     if "realm" not in fields:
         return None
     data = json.loads(_get(f"{fields['realm']}?service={fields.get('service', '')}"
-                           f"&scope=repository:{repository}:pull", None))
+                           f"&scope=repository:{repository}:pull", None, basic=_dockerhub_basic(host)))
     return data.get("token") or data.get("access_token")
 
 
 @cache
 def registry_config(image: str) -> dict:
-    """The image config (Env, WorkingDir, ...) for linux/amd64."""
+    """The image config (Env, WorkingDir, ...) for linux/amd64, cached on disk."""
+    path = CACHE_DIR / (hashlib.sha256(image.encode()).hexdigest() + ".json")
+    try:
+        if time.time() - path.stat().st_mtime < CACHE_TTL_SEC:
+            return json.loads(path.read_text())
+    except (OSError, ValueError):
+        pass
+    config = _fetch_config(image)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as file:
+        json.dump(config, file)
+    os.replace(file.name, path)
+    return config
+
+
+def _fetch_config(image: str) -> dict:
     host, repository, reference = split_reference(image)
     token = _token(host, repository)
     base = f"https://{host}/v2/{repository}"
@@ -101,20 +151,22 @@ def image_runtime(environment) -> tuple[dict[str, str], str | None]:
     return image_env, task.workdir or workdir
 
 
+class ImageConfigUnavailableError(RuntimeError):
+    """The task image's config could not be read; the trial is an infrastructure failure."""
+
+
 async def resolve_image_runtime(environment, logger):
     """Image ENV below the environment's own task/trial values, and WORKDIR.
 
-    Returns (None, None) for Docker, which applies the config natively, and
-    when the config is unavailable (logged); the driver then keeps the exec
-    shell's environment and working directory.
+    Returns (None, None) for Docker, which applies the config natively. Raises
+    ImageConfigUnavailableError when the config cannot be read, so the trial
+    fails as infrastructure and is retried rather than run without its toolchain.
     """
     if isinstance(environment, DockerEnvironment):
         return None, None
     try:
         image_env, workdir = await asyncio.to_thread(image_runtime, environment)
     except Exception as error:
-        logger.warning("Task image config unavailable (%s: %s); the Reason worker keeps the "
-                       "exec shell's environment and working directory", type(error).__name__, error)
-        return None, None
+        raise ImageConfigUnavailableError(f"task image config unavailable ({type(error).__name__}: {error})") from error
     startup_env = getattr(environment, "_startup_env", dict)()
     return {key: value for key, value in image_env.items() if key not in startup_env}, workdir
