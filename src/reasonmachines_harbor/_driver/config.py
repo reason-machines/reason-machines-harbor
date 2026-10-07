@@ -14,7 +14,11 @@ class AdapterRuntimeConfig:
     # Session event polling: the API has no event stream for API keys, so a
     # Session's end is seen up to one interval late. Each poll costs ~8 DB
     # statements; at 100 concurrent trials 1 s polling would add ~550/s.
+    # Polls that bring no new items double the wait up to the idle cap (3, 6,
+    # 12, 15 s); a new item resets it. An end that follows a quiet stretch with
+    # no final item is therefore seen up to the idle cap late.
     poll_interval_sec: float = 3.0
+    poll_idle_interval_max_sec: float = 15.0
     poll_interval_max_sec: float = 30.0
 
     api_read_attempts: int = 3
