@@ -11,15 +11,20 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class AdapterRuntimeConfig:
-    # Session event polling: the API has no event stream for API keys, so a
-    # Session's end is seen up to one interval late. Each poll costs ~8 DB
-    # statements; at 100 concurrent trials 1 s polling would add ~550/s.
-    # Polls that bring no new items double the wait up to the idle cap (3, 6,
-    # 12, 15 s); a new item resets it. An end that follows a quiet stretch with
-    # no final item is therefore seen up to the idle cap late.
+    # Session event polling: the API has no event stream for API keys. Each
+    # poll costs ~4 DB statements; at 100 concurrent trials 1 s polling would
+    # add ~400/s. A poll asks the server to wait up to poll_wait_ms for the
+    # next event or the Session's end and answers as soon as either commits,
+    # so a quiet stretch costs one request per wait. The intervals below
+    # space poll starts: polls that bring no new items double the spacing up
+    # to the idle cap (3, 6, 12, 15 s), and a new item resets it. A server
+    # that does not wait answers at once and gets exactly that backoff.
     poll_interval_sec: float = 3.0
     poll_idle_interval_max_sec: float = 15.0
     poll_interval_max_sec: float = 30.0
+    # The server bounds the whole request by it (max 20 s). Half of
+    # api_read_timeout_sec, which also covers a retry after a transport error.
+    poll_wait_ms: int = 15_000
 
     api_read_attempts: int = 3
     api_read_timeout_sec: float = 30.0

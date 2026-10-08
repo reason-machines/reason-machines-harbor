@@ -1509,10 +1509,12 @@ class ReasonDriver:
                     poll_delay = self.poll_interval
                     idle_poll_delay_max = max(self.poll_interval, DEFAULT_RUNTIME_CONFIG.poll_idle_interval_max_sec)
                     while True:
+                        poll_started = time.monotonic()
                         try:
                             event_batch = await self._api(
                                 "GET",
-                                f"sessions/{quote(self.ara_session_id, safe='')}/events?after_seq={cursor}&limit={DEFAULT_RUNTIME_CONFIG.event_page_size}",
+                                f"sessions/{quote(self.ara_session_id, safe='')}/events?after_seq={cursor}"
+                                f"&limit={DEFAULT_RUNTIME_CONFIG.event_page_size}&wait_ms={DEFAULT_RUNTIME_CONFIG.poll_wait_ms}",
                             )
                         except (ReasonAPIError, ReasonAPITransportError) as poll_error:
                             if isinstance(poll_error, ReasonAPIError) and poll_error.definitive_rejection and poll_error.status != 429:
@@ -1568,9 +1570,10 @@ class ReasonDriver:
                             if HANDS_LOST_OUTPUT.search(last_tool_result):
                                 raise ReasonSessionResourceUnavailableError(status="exit", reason_code="hands_lost")
                             break
-                        # Each poll that brings no new items doubles the next wait, up
-                        # to the idle cap; any new item resets it to the base interval.
-                        await asyncio.sleep(poll_delay)
+                        # Each poll that brings no new items doubles the spacing to the
+                        # next poll start, up to the idle cap; any new item resets it to
+                        # the base interval. Time the server spent waiting counts.
+                        await asyncio.sleep(max(0.0, poll_delay - (time.monotonic() - poll_started)))
                         poll_delay = min(idle_poll_delay_max, poll_delay * 2)
                 self.populate_context(context)
                 context.metadata["stage"] = "complete"

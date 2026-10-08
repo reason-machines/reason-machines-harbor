@@ -110,7 +110,8 @@ def test_session_events_are_polled_from_the_configured_interval(tmp_path, monkey
     trial = Trial(running_polls=2)
     _, context, sleeps = trial_run(tmp_path, monkeypatch, trial, **options)
     assert context.metadata["stage"] == "complete"
-    assert sleeps == expected
+    # The poll's own time counts toward the spacing (0.3.16 long-polls with wait_ms).
+    assert sleeps == pytest.approx(expected, abs=0.05)
     assert trial.calls.count(("GET", f"{ORG}/sessions/{SESSION}/events")) == 3
 
 
@@ -119,7 +120,7 @@ def test_an_idle_session_poll_backs_off_to_the_cap_and_a_new_item_resets_it(tmp_
     trial = Trial(running_polls=7, item_polls={4})
     _, context, sleeps = trial_run(tmp_path, monkeypatch, trial)
     assert context.metadata["stage"] == "complete"
-    assert sleeps == [3.0, 6.0, 12.0, 15.0, 3.0, 6.0, 12.0]
+    assert sleeps == pytest.approx([3.0, 6.0, 12.0, 15.0, 3.0, 6.0, 12.0], abs=0.05)
     assert trial.calls.count(("GET", f"{ORG}/sessions/{SESSION}/events")) == 8
     assert len((tmp_path / "logs" / "events.jsonl").read_text().splitlines()) == 1
 

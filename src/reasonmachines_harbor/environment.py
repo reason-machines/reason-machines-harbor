@@ -32,6 +32,21 @@ class ReasonDockerEnvironment(DockerEnvironment):
         )
 
 
+# E2B runs every command in a login shell, and a Debian-style /etc/profile resets PATH
+# before it sources /etc/profile.d, so the image's PATH entries are put back there.
+PROFILE_SCRIPT = "/etc/profile.d/00-reason-image-path.sh"
+
+
+def image_path_profile(path: str) -> str:
+    """A profile.d script that prepends the PATH entries a login shell's /etc/profile dropped."""
+    entries = [entry for entry in path.split(":") if entry]
+    quoted = " ".join("'" + entry.replace("'", "'\\''") + "'" for entry in reversed(entries))
+    return ("# Written by reason-machines-harbor: the task image's PATH, which /etc/profile resets.\n"
+            f'for _reason_entry in {quoted}; do\n'
+            '  case ":$PATH:" in *":$_reason_entry:"*) ;; *) PATH="$_reason_entry:$PATH" ;; esac\n'
+            "done\nunset _reason_entry\nexport PATH\n")
+
+
 class ReasonE2BEnvironment(E2BEnvironment):
     """E2B with the task image's ENV below task and trial values; WORKDIR stays Harbor's."""
 
@@ -43,6 +58,9 @@ class ReasonE2BEnvironment(E2BEnvironment):
             raise ImageConfigUnavailableError(
                 f"task image config unavailable ({type(error).__name__}: {error})") from error
         await super().start(force_build)
+        path = self._startup_env().get("PATH") if "PATH" in self._image_env else None
+        if path:
+            await self._sandbox.files.write(PROFILE_SCRIPT, image_path_profile(path), user="root")
 
     def _startup_env(self) -> dict[str, str]:
         return {**getattr(self, "_image_env", {}), **super()._startup_env()}

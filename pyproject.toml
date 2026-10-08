@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "reason-machines-harbor"
-version = "0.3.15"
+version = "0.3.16"
 description = "Harbor adapter for the public Reason Machines portable worker"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -15,3 +15,10 @@ dependencies = ["harbor==0.22.0", "httpx>=0.28,<0.29", "pyyaml>=6,<7"]
 # copy it into this package, so the sdist and wheel are self-contained and
 # never share installed files with the other adapter.
 packages = ["src/reasonmachines_harbor"]
+
+[dependency-groups]
+dev = ["pytest>=8,<9"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"

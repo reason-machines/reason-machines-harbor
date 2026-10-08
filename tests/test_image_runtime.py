@@ -137,16 +137,21 @@ def test_e2b_sandbox_gets_the_image_env_below_task_values(tmp_path, monkeypatch)
 
     monkeypatch.setattr(image_runtime, "registry_config", lambda image: IMAGE_CONFIG)
     monkeypatch.setattr(E2BEnvironment, "_startup_env", lambda self: {"TASK_VALUE": "task"})
-    started = []
+    started, written = [], []
 
     async def start(self, force_build):
         started.append(self._startup_env())
+
+        async def write(path, data, user=None):
+            written.append(path)
+        self._sandbox = SimpleNamespace(files=SimpleNamespace(write=write))
     monkeypatch.setattr(E2BEnvironment, "start", start)
     environment = ReasonE2BEnvironment.__new__(ReasonE2BEnvironment)
     environment.task_env_config = SimpleNamespace(docker_image="ghcr.io/scaleapi/swe-atlas:task", workdir=None)
     environment.environment_dir = tmp_path
     asyncio.run(environment.start(force_build=False))
     assert started == [{"PATH": GO_PATH, "GOPATH": "/go", "GOMODCACHE": "/go/pkg/mod", "TASK_VALUE": "task"}]
+    assert written == ["/etc/profile.d/00-reason-image-path.sh"]  # the image sets PATH (0.3.16)
 
     monkeypatch.setattr(image_runtime, "registry_config", lambda image: (_ for _ in ()).throw(OSError("429")))
     environment = ReasonE2BEnvironment.__new__(ReasonE2BEnvironment)
