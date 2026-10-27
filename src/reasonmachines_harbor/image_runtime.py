@@ -60,13 +60,15 @@ RETRY_DELAYS_SEC = (2, 5, 10, 20, 40, 60)
 
 def _get(url: str, token: str | None, accept: str | None = None, basic: str | None = None) -> bytes:
     headers = {"Accept": accept} if accept else {}
-    if token:
-        headers["Authorization"] = "Bearer " + token
-    elif basic:
-        headers["Authorization"] = "Basic " + basic
+    authorization = "Bearer " + token if token else "Basic " + basic if basic else None
     for delay in (*RETRY_DELAYS_SEC, None):
+        request = urllib.request.Request(url, headers=headers)
+        # Not carried to a redirect: from AWS, Docker Hub sends blob reads to a presigned S3
+        # URL, which refuses a second credential (400 "Only one auth mechanism allowed").
+        if authorization:
+            request.add_unredirected_header("Authorization", authorization)
         try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=60) as response:
+            with urllib.request.urlopen(request, timeout=60) as response:
                 return response.read()
         except urllib.error.HTTPError as error:
             if delay is None or (error.code != 429 and error.code < 500):

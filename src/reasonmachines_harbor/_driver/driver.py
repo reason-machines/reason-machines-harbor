@@ -94,12 +94,15 @@ RUNTIME_PROFILES = {*V7_RUNTIME_PROFILES, *EPHEMERAL_ONLY_RUNTIME_PROFILES}
 # recovery_defer_idle_hands is an opt-in recovery experiment, never a default, and
 # so are the fewer_tests_* rungs asking for fewer new tests (the server refuses two at once),
 # and bash_yield and sync_bash, which carry the retired sync-yield harness's Bash into v7,
-# and turn_line_removed and turn_line_questions, v8's turn-guideline experiments (v8 and v8.1 only).
+# and turn_line_removed and turn_line_questions, v8's turn-guideline experiments (v8 and v8.1 only),
+# and output_cap_continue, image_history_append_only and cache_ttl_1h, which change provider request
+# options and loop mechanics only (any v7 profile, runtime/reason-agent-1.2 included).
 TEST_WRITING_FEATURES = ("fewer_tests_low", "fewer_tests_medium", "fewer_tests_high", "fewer_tests_max",
                          "fewer_tests_max_alone", "verify_line_alone", "addendum_placebo")
 RUNTIME_FEATURES = ("banner", "sdk_index", "service_tier", "output_cap", "git_metadata", "serial_reads",
                     "recovery_defer_idle_hands", *TEST_WRITING_FEATURES, "bash_yield", "sync_bash",
-                    "turn_line_removed", "turn_line_questions")
+                    "turn_line_removed", "turn_line_questions",
+                    "output_cap_continue", "image_history_append_only", "cache_ttl_1h")
 # sdk_index puts Reason's tools in codemode, and they include web_search and
 # web_fetch, which run in Reason's cloud and so bypass the task's network policy.
 # An offline task (agent phase not public: DeepSWE) that names no features gets
