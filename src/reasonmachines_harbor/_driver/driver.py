@@ -75,17 +75,25 @@ REASON_V8_2_2026_10_RUNTIME_PROFILE = "runtime/reason-v8.2-2026-10"
 # release name (only the id differs; same worker CLI and agent tools archive).
 # Immutable: a change ships as runtime/reason-agent-1.3.
 REASON_AGENT_1_2_RUNTIME_PROFILE = "runtime/reason-agent-1.2"
+# Reason Agent 1.3: runtime/reason-agent-1.2 with output_cap_continue,
+# image_history_append_only and cache_ttl_1h in its default features, cut on
+# 2026-10-27; a newer worker CLI (Bash commands off the shell's argv) and agent
+# tools (adds bc, column, pkill, pgrep, free, which). Immutable: a change ships as
+# runtime/reason-agent-1.4.
+REASON_AGENT_1_3_RUNTIME_PROFILE = "runtime/reason-agent-1.3"
 # What an ephemeral trial runs when its config names no runtime_profile: the
 # current frozen release, so a benchmark result names one frozen harness without
 # asking for it. Naming a profile overrides it; C2_TOOLS_V7_RUNTIME_PROFILE runs
 # the server's current default harness, which changes with every deploy.
-DEFAULT_EPHEMERAL_RUNTIME_PROFILE = REASON_AGENT_1_2_RUNTIME_PROFILE
+DEFAULT_EPHEMERAL_RUNTIME_PROFILE = REASON_AGENT_1_3_RUNTIME_PROFILE
 V7_RUNTIME_PROFILES = {C2_TOOLS_V7_RUNTIME_PROFILE, REASON_V7_2026_10_RUNTIME_PROFILE, REASON_V7_2026_11_RUNTIME_PROFILE,
                        REASON_V8_2026_10_RUNTIME_PROFILE, REASON_V8_1_2026_10_RUNTIME_PROFILE,
-                       REASON_V8_2_2026_10_RUNTIME_PROFILE, REASON_AGENT_1_2_RUNTIME_PROFILE}
+                       REASON_V8_2_2026_10_RUNTIME_PROFILE, REASON_AGENT_1_2_RUNTIME_PROFILE,
+                       REASON_AGENT_1_3_RUNTIME_PROFILE}
 EPHEMERAL_ONLY_RUNTIME_PROFILES = {REASON_V7_2026_10_RUNTIME_PROFILE, REASON_V7_2026_11_RUNTIME_PROFILE,
                                    REASON_V8_2026_10_RUNTIME_PROFILE, REASON_V8_1_2026_10_RUNTIME_PROFILE,
-                                   REASON_V8_2_2026_10_RUNTIME_PROFILE, REASON_AGENT_1_2_RUNTIME_PROFILE}
+                                   REASON_V8_2_2026_10_RUNTIME_PROFILE, REASON_AGENT_1_2_RUNTIME_PROFILE,
+                                   REASON_AGENT_1_3_RUNTIME_PROFILE}
 RUNTIME_PROFILES = {*V7_RUNTIME_PROFILES, *EPHEMERAL_ONLY_RUNTIME_PROFILES}
 # Requested as experimental_runtime_features: the Reason features an ephemeral v7
 # Session runs on top of the stock harness. An empty list is stock's shape; None sends
@@ -96,7 +104,8 @@ RUNTIME_PROFILES = {*V7_RUNTIME_PROFILES, *EPHEMERAL_ONLY_RUNTIME_PROFILES}
 # and bash_yield and sync_bash, which carry the retired sync-yield harness's Bash into v7,
 # and turn_line_removed and turn_line_questions, v8's turn-guideline experiments (v8 and v8.1 only),
 # and output_cap_continue, image_history_append_only and cache_ttl_1h, which change provider request
-# options and loop mechanics only (any v7 profile, runtime/reason-agent-1.2 included).
+# options and loop mechanics only (any v7 profile, runtime/reason-agent-1.2 included; runtime/reason-agent-1.3
+# runs them by default).
 TEST_WRITING_FEATURES = ("fewer_tests_low", "fewer_tests_medium", "fewer_tests_high", "fewer_tests_max",
                          "fewer_tests_max_alone", "verify_line_alone", "addendum_placebo")
 RUNTIME_FEATURES = ("banner", "sdk_index", "service_tier", "output_cap", "git_metadata", "serial_reads",
@@ -109,6 +118,11 @@ RUNTIME_FEATURES = ("banner", "sdk_index", "service_tier", "output_cap", "git_me
 # this list instead of the deployment default, as Artificial Analysis disables
 # provider-hosted search and browsing to keep such tasks offline.
 OFFLINE_TASK_RUNTIME_FEATURES: list[str] = []
+# A release whose default features include more than sdk_index keeps the rest offline:
+# its default without sdk_index.
+RELEASE_OFFLINE_TASK_RUNTIME_FEATURES: dict[str, list[str]] = {
+    REASON_AGENT_1_3_RUNTIME_PROFILE: ["output_cap_continue", "image_history_append_only", "cache_ttl_1h"],
+}
 WORKSPACE_OWNERSHIP = "externally-managed"
 # Public headless Sessions install a private environment before attaching Hands.
 REQUIRED_WORKER_CAPABILITIES = ("hands.connect", "environment.install")
@@ -507,7 +521,8 @@ class ReasonDriver:
         self.agent_network_mode = agent_network_mode
         if (agent_network_mode not in (None, "public") and self.runtime_features is None
                 and self._features_apply()):
-            self.runtime_features = list(OFFLINE_TASK_RUNTIME_FEATURES)
+            self.runtime_features = list(RELEASE_OFFLINE_TASK_RUNTIME_FEATURES.get(self.runtime_profile,
+                                                                               OFFLINE_TASK_RUNTIME_FEATURES))
             self.runtime_features_source = "offline_task"
 
     def _format_model_credential_error(self, error: ReasonAPIError) -> ReasonAPIError:

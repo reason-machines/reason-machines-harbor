@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "reason-machines-harbor"
-version = "0.3.41"
+version = "0.3.42"
 description = "Harbor adapter for the public Reason portable worker"
 readme = "README.md"
 requires-python = ">=3.12"

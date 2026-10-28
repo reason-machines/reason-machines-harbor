@@ -1,4 +1,4 @@
-"""An ephemeral trial that names no runtime_profile runs the current frozen release, Reason Agent 1.2.
+"""An ephemeral trial that names no runtime_profile runs the current frozen release, Reason Agent 1.3.
 
 Benchmark results then name one frozen harness without the command asking for it.
 Naming a profile overrides it, and standard mode keeps the server's default.
@@ -9,6 +9,7 @@ from reasonmachines_harbor._driver.driver import (
     C2_TOOLS_V7_RUNTIME_PROFILE,
     DEFAULT_EPHEMERAL_RUNTIME_PROFILE,
     REASON_AGENT_1_2_RUNTIME_PROFILE,
+    REASON_AGENT_1_3_RUNTIME_PROFILE,
     REASON_V7_2026_10_RUNTIME_PROFILE,
     REASON_V7_2026_11_RUNTIME_PROFILE,
     REASON_V8_1_2026_10_RUNTIME_PROFILE,
@@ -24,9 +25,9 @@ def driver(tmp_path, monkeypatch):
 
 
 def test_ephemeral_without_a_profile_runs_the_frozen_release(driver):
-    assert DEFAULT_EPHEMERAL_RUNTIME_PROFILE == REASON_AGENT_1_2_RUNTIME_PROFILE == "runtime/reason-agent-1.2"
-    assert driver().runtime_profile == REASON_AGENT_1_2_RUNTIME_PROFILE
-    assert driver(mode="ephemeral").runtime_profile == REASON_AGENT_1_2_RUNTIME_PROFILE
+    assert DEFAULT_EPHEMERAL_RUNTIME_PROFILE == REASON_AGENT_1_3_RUNTIME_PROFILE == "runtime/reason-agent-1.3"
+    assert driver().runtime_profile == REASON_AGENT_1_3_RUNTIME_PROFILE
+    assert driver(mode="ephemeral").runtime_profile == REASON_AGENT_1_3_RUNTIME_PROFILE
 
 
 def test_a_named_profile_overrides_the_default(driver):
@@ -107,11 +108,11 @@ def test_v8_1_is_named_explicitly_runs_v8s_worker_and_installs_its_pinned_agent_
         assert not driver(runtime_profile=profile).installs_agent_tools
 
 
-def test_the_default_release_runs_v8_2s_worker_and_installs_v8_2s_pinned_agent_tools(driver):
+def test_agent_1_2_runs_v8_2s_worker_and_installs_v8_2s_pinned_agent_tools(driver):
     from reasonmachines_harbor._driver.cli_release import RELEASE_AGENT_TOOLS, release_archive
     from reasonmachines_harbor._driver.driver import REASON_V8_2_2026_10_RUNTIME_PROFILE
 
-    release = driver()
+    release = driver(runtime_profile=REASON_AGENT_1_2_RUNTIME_PROFILE)
     assert release.runtime_profile == REASON_AGENT_1_2_RUNTIME_PROFILE
     with pytest.raises(Exception):
         driver(mode="standard", runtime_profile=REASON_AGENT_1_2_RUNTIME_PROFILE)
@@ -124,3 +125,33 @@ def test_the_default_release_runs_v8_2s_worker_and_installs_v8_2s_pinned_agent_t
     }
     assert release.installs_agent_tools
     assert release.agent_tools_sha == "059652fc47297dfab47833917f11d02858c8e34fb9bfd45bcd66d381d695cab5"
+
+
+def test_the_default_release_1_3_pins_its_worker_and_agent_tools_and_keeps_its_default_features_offline(driver):
+    from reasonmachines_harbor._driver.cli_release import RELEASE_AGENT_TOOLS, release_archive
+
+    release = driver()
+    assert release.runtime_profile == REASON_AGENT_1_3_RUNTIME_PROFILE
+    with pytest.raises(Exception):
+        driver(mode="standard", runtime_profile=REASON_AGENT_1_3_RUNTIME_PROFILE)
+    # The worker that runs Bash commands off the shell's argv.
+    pinned = release_archive(REASON_AGENT_1_3_RUNTIME_PROFILE)
+    assert pinned["selected_version"] == "0.2.625"
+    assert pinned["archive_sha256"] == "6d9dcade664b25e87ab21a5d19cead022b5484772ca2bf6468a3640ad3325c75"
+    assert pinned["musl_archive_sha256"] == "509c399541555777a6465c899e3ecf1517831ee40fcc65ece654e3ab50082c6c"
+    # 1.2's agent tools plus bc, column, pkill, pgrep, free and which.
+    assert RELEASE_AGENT_TOOLS[REASON_AGENT_1_3_RUNTIME_PROFILE] == {
+        "url": "https://github.com/reason-machines/benchmark/releases/download/agent-tools-2026-10-27/agent-tools-linux-x64.tgz",
+        "sha256": "00252f67c979c7ab175e77cde6ca8e974c23aebe4da62ac747bd73050b2ede72",
+    }
+    assert release.installs_agent_tools and release.agent_tools_sha == "00252f67c979c7ab175e77cde6ca8e974c23aebe4da62ac747bd73050b2ede72"
+    # An online task names no features: the server runs the release's default (sdk_index and the three).
+    release._apply_agent_network("public")
+    assert release.runtime_features is None
+    # An offline task (DeepSWE) runs the three without sdk_index; 1.2 still sends an empty list.
+    release._apply_agent_network("no-network")
+    assert release.runtime_features == ["output_cap_continue", "image_history_append_only", "cache_ttl_1h"]
+    assert release.runtime_features_source == "offline_task"
+    older = driver(runtime_profile=REASON_AGENT_1_2_RUNTIME_PROFILE)
+    older._apply_agent_network("no-network")
+    assert older.runtime_features == []

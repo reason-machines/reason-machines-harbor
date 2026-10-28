@@ -1795,7 +1795,7 @@ wheels = [
 
 [[package]]
 name = "reason-machines-harbor"
-version = "0.3.41"
+version = "0.3.42"
 source = { editable = "." }
 dependencies = [
     { name = "harbor" },

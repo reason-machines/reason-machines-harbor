@@ -66,6 +66,13 @@ RELEASE_CLI_ARCHIVES = {
         "archive_sha256": "2c3ea45c1e28c9e65046d36249ed0f297c7fc1edff30c9fc3a6de0a9244c7955",
         "musl_archive_sha256": "a1de656866b444f4eca1a9d0e8c8a251c845e1f0dd7ef9b514c03d730e8f50c8",
     },
+    # The worker that runs each Bash command off its shell's argv, so pkill -f with a
+    # pattern from the command spares that shell.
+    "runtime/reason-agent-1.3": {
+        "version": "0.2.625",
+        "archive_sha256": "6d9dcade664b25e87ab21a5d19cead022b5484772ca2bf6468a3640ad3325c75",
+        "musl_archive_sha256": "509c399541555777a6465c899e3ecf1517831ee40fcc65ece654e3ab50082c6c",
+    },
 }
 # A dated benchmark release that ships agent tools (rg, file, xxd, strings, unzip,
 # apply_patch: packages/reason-machines-driver/agent-tools) installs this archive
@@ -86,6 +93,11 @@ RELEASE_AGENT_TOOLS = {
     "runtime/reason-agent-1.2": {
         "url": "https://github.com/reason-machines/benchmark/releases/download/agent-tools-2026-10-23/agent-tools-linux-x64.tgz",
         "sha256": "059652fc47297dfab47833917f11d02858c8e34fb9bfd45bcd66d381d695cab5",
+    },
+    # 1.2's tools plus bc, pkill, pgrep, free and which (BusyBox applets) and column (util-linux).
+    "runtime/reason-agent-1.3": {
+        "url": "https://github.com/reason-machines/benchmark/releases/download/agent-tools-2026-10-27/agent-tools-linux-x64.tgz",
+        "sha256": "00252f67c979c7ab175e77cde6ca8e974c23aebe4da62ac747bd73050b2ede72",
     },
 }
 CLI_MANIFEST_MAX_BYTES = 64 * 1024
