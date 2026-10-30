@@ -1216,6 +1216,7 @@ class ReasonDriver:
         deadline = time.monotonic() + DEFAULT_RUNTIME_CONFIG.worker_start_timeout_sec
         interval = DEFAULT_RUNTIME_CONFIG.worker_readiness_poll_interval_sec
         status_retries = []
+        direct_access_requested = False
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
             status_timeout = min(DEFAULT_RUNTIME_CONFIG.worker_status_timeout_sec, max(1, math.ceil(remaining)))
@@ -1274,6 +1275,13 @@ class ReasonDriver:
                     raise ReasonWorkerStartupError("worker required capabilities unavailable: " + ", ".join(unavailable))
             if self.device_id and live.get("executionEligible") is True:
                 device = (await self._api("GET", f"devices/{quote(self.device_id, safe='')}"))["device"]
+                # A new API-key worker starts with direct access off (the owner's
+                # opt-in). This trial's own ephemeral worker is the owner's: opt in once.
+                if device.get("direct_access_enabled") is False and not direct_access_requested:
+                    direct_access_requested = True
+                    await self._api("PATCH", f"devices/{quote(self.device_id, safe='')}/direct-access",
+                                    {"enabled": True, "expected_revision": device["direct_access_revision"]})
+                    continue
                 roots = device["roots"]
                 if len(roots) != 1 or roots[0].get("path_fingerprint") != fingerprint:
                     raise ReasonWorkerStartupError("expected exactly one benchmark root")

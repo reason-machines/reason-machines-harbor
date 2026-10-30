@@ -53,7 +53,7 @@ class ReasonAgent(BaseAgent):
         return "reason"
 
     def version(self) -> str:
-        return "0.3.42"
+        return "0.3.43"
 
     async def setup(self, environment: BaseEnvironment) -> None:
         driver = self.driver
