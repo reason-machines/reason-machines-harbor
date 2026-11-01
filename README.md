@@ -10,11 +10,12 @@ receives a one-use enrollment ticket.
 ## Install
 
 ```bash
-uv pip install reason-machines-harbor
+uv tool install "harbor==0.22.0" --with reason-machines-harbor
 ```
 
-This installs Harbor 0.22.0. For cloud environments, add the matching Harbor
-extra, for example `uv pip install "harbor[modal]==0.22.0"`.
+The adapter needs Harbor 0.22.0 and Python 3.12 or later. For cloud
+environments, add the matching Harbor extra, for example
+`"harbor[e2b,modal]==0.22.0"`.
 
 ## Run
 
@@ -36,7 +37,16 @@ DOCKER_DEFAULT_PLATFORM=linux/amd64 harbor run \
 ```
 
 The worker connects out to the Reason API and relay, so both
-`--allow-agent-host` flags are required, even for offline tasks.
+`--allow-agent-host` flags are required, even for offline tasks. Drop
+`--n-tasks 1` to run the whole dataset. On e2b, use
+`--env reasonmachines_harbor.environment:ReasonE2BEnvironment`: it keeps the
+task image's environment variables, PATH included, which e2b otherwise drops.
+
+Each trial's `agent/` folder holds the Session as the model saw it
+(`trajectory.json`, ATIF), its link, status and cost (`session.json`) and
+what it ran on (`receipt.json`, `deployment.json`). API errors are
+reported by code, for example `missing_scope` or
+`ephemeral_workspace_parent_payment_required`.
 
 | Agent kwarg (`--ak`) | Default | Meaning |
 |---|---|---|
