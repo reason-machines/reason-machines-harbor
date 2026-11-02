@@ -10,12 +10,13 @@ receives a one-use enrollment ticket.
 ## Install
 
 ```bash
-uv tool install "harbor==0.22.0" --with reason-machines-harbor
+uv tool install "harbor==0.25.0" --with "reason-machines-harbor>=0.3.44"
 ```
 
-The adapter needs Harbor 0.22.0 and Python 3.12 or later. For cloud
+The adapter works with Harbor 0.22 to 0.25 and Python 3.12 or later. For cloud
 environments, add the matching Harbor extra, for example
-`"harbor[e2b,modal]==0.22.0"`.
+`"harbor[e2b,modal]==0.25.0"`. To reproduce our published results, use the
+Harbor version the [benchmark scripts](https://github.com/reason-machines/benchmark) pin.
 
 ## Run
 
@@ -67,3 +68,7 @@ To run the full benchmarks and reproduce our results, see
 [reason-machines/reason-machines-harbor](https://github.com/reason-machines/reason-machines-harbor)
 is a read-only copy of the adapter in the Reason monorepo, where it is
 developed and tested. Releases are tagged `vX.Y.Z`.
+
+## License
+
+[Apache-2.0](LICENSE).
