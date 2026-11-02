@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "reason-machines-harbor"
-version = "0.3.44"
+version = "0.3.45"
 description = "Harbor adapter for the public Reason portable worker"
 readme = "README.md"
 license = "Apache-2.0"

@@ -165,23 +165,14 @@ RELAY_HOSTS = {
     "production": ("relay.reasonmachines.com",),
 }
 
-SAFE_API_ERRORS = frozenset({
-    "resource_unavailable", "run_cancelled",
-    "quota_exhausted", "group_max_runs_per_day", "group_spend_limit_exceeded",
-    "invalid_request", "invalid_model", "invalid_reasoning_effort", "missing_scope",
-    "unauthorized", "forbidden", "invalid_api_key", "api_key_expired", "api_key_revoked",
-    "session_not_found", "device_not_found", "session_target_unavailable",
-    "headless_workers_unavailable", "cloud_agents_disabled", "runtime_preflight_unavailable",
-    "central_relay_unavailable",
-    "agent_model_key_missing", "local_device_incompatible", "idempotency_profile_conflict", "idempotency_target_conflict",
-    "benchmark_profile_requires_headless_project_root", "benchmark_profile_requires_fresh_session",
-    "prompt_required", "prompt_too_large", "request_too_large", "rate_limit_exceeded", "instruction_blocked",
-    "ephemeral_workspace_reference_conflict", "ephemeral_workspace_retired",
-    "ephemeral_workspace_limit_reached", "ephemeral_workspace_key_unavailable",
-    "ephemeral_workspace_parent_payment_required", "ephemeral_workspace_parent_credit_exhausted", "ephemeral_workspace_required",
-    "ephemeral_workspace_mode_required", "ephemeral_workspace_idempotency_key_required",
-    "ephemeral_requires_external_workspace", "ephemeral_workspace_consumed", "hands_lost",
-})
+# A machine code is a short snake_case identifier the API defines (missing_scope,
+# provider_auth_failed, ...). It can't hold a secret or free text, so every one is shown;
+# a fixed list hid each code added after an adapter release, leaving only "status=error".
+MACHINE_CODE = re.compile(r"[a-z][a-z0-9_]{1,63}")
+
+
+def _machine_code(value: object) -> str | None:
+    return value if isinstance(value, str) and MACHINE_CODE.fullmatch(value) else None
 # The server's tool result when the task machine is gone (hands-tool-runtime.ts handsLostOutput).
 HANDS_LOST_OUTPUT = re.compile(r"The machine running this Session (?:is unavailable|stopped responding) \(")
 
@@ -227,7 +218,7 @@ def _cancelled(value: object) -> bool:
 
 
 def _public_session_code(value: object) -> str | None:
-    return value if isinstance(value, str) and (value in SAFE_API_ERRORS or _cancelled(value)) else None
+    return _machine_code(value)
 
 
 class ReasonSessionTerminalError(RuntimeError):
@@ -269,7 +260,7 @@ class ReasonAPIError(RuntimeError):
     """HTTP status and a deliberately bounded public machine code; never a body."""
     def __init__(self, status: int, code: str | None = None, guidance: str | None = None):
         self.status = status
-        self.code = code if code in SAFE_API_ERRORS else None
+        self.code = _machine_code(code)
         self.guidance = guidance
         self.retry_after_sec = None
         # This specific admission rejection occurs before Session persistence.
