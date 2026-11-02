@@ -6,6 +6,14 @@ from urllib.parse import urlparse
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
+
+# Harbor 0.25 declares agent features as capabilities and refuses reasoning_effort, a
+# task's skills or MCP servers unless the agent declares them; the driver passes all three
+# to the Session. 0.22 reads SUPPORTS_ATIF and gates none of them.
+try:
+    from harbor.agents.capabilities import AgentCapabilities
+except ImportError:
+    AgentCapabilities = None
 from ._driver import DEFAULT_RUNTIME_CONFIG, ReasonDriver, task_agent_timeout_sec
 from ._driver.driver import ReasonWorkerStartupError
 
@@ -16,7 +24,10 @@ from .image_runtime import resolve_image_runtime
 
 class ReasonAgent(BaseAgent):
     """Linux task containers with outbound Reason transport; native Harbor grading."""
-    SUPPORTS_ATIF: bool = True
+    if AgentCapabilities is None:
+        SUPPORTS_ATIF: bool = True
+    else:
+        capabilities = AgentCapabilities(atif=True, reasoning_effort=True, skills=True, mcp_servers=True)
 
     def __init__(self, *args, channel: str | None = None,
                  cli_archive_sha256: str | None = None,
@@ -53,7 +64,7 @@ class ReasonAgent(BaseAgent):
         return "reason"
 
     def version(self) -> str:
-        return "0.3.43"
+        return "0.3.44"
 
     async def setup(self, environment: BaseEnvironment) -> None:
         driver = self.driver

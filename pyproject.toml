@@ -4,11 +4,19 @@ build-backend = "hatchling.build"
 
 [project]
 name = "reason-machines-harbor"
-version = "0.3.43"
+version = "0.3.44"
 description = "Harbor adapter for the public Reason portable worker"
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.12"
-dependencies = ["harbor==0.22.0", "httpx>=0.28,<0.29", "pyyaml>=6,<7"]
+# Tested on Harbor 0.22.0 and 0.25.0; the upper bound waits for each new minor to be tested.
+dependencies = ["harbor>=0.22.0,<0.26", "httpx>=0.28,<0.29", "pyyaml>=6,<7"]
+
+[project.urls]
+Homepage = "https://reasonmachines.ai"
+Source = "https://github.com/reason-machines/reason-machines-harbor"
+Benchmarks = "https://github.com/reason-machines/benchmark"
+Issues = "https://github.com/reason-machines/benchmark/issues"
 
 [tool.hatch.build.targets.wheel]
 # reasonmachines_harbor/_driver links to packages/reason-machines-driver. Builds
