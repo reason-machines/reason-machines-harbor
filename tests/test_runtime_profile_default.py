@@ -40,7 +40,7 @@ def test_standard_mode_keeps_the_server_default(driver):
 
 
 def test_the_release_reads_runtime_features(driver):
-    assert driver(runtime_features=["sdk_index"]).runtime_features == ["sdk_index"]
+    assert driver(runtime_features=["cache_ttl_1h", "banner"]).runtime_features == ["banner", "cache_ttl_1h"]
 
 
 def test_the_release_runs_its_pinned_cli_and_anything_else_the_stable_one():
@@ -145,13 +145,10 @@ def test_the_default_release_1_3_pins_its_worker_and_agent_tools_and_keeps_its_d
         "sha256": "00252f67c979c7ab175e77cde6ca8e974c23aebe4da62ac747bd73050b2ede72",
     }
     assert release.installs_agent_tools and release.agent_tools_sha == "00252f67c979c7ab175e77cde6ca8e974c23aebe4da62ac747bd73050b2ede72"
-    # An online task names no features: the server runs the release's default (sdk_index and the three).
-    release._apply_agent_network("public")
-    assert release.runtime_features is None
-    # An offline task (DeepSWE) runs the three without sdk_index; 1.2 still sends an empty list.
-    release._apply_agent_network("no-network")
+    # Every task, public network included, runs the three without sdk_index (no cloud web tools);
+    # 1.2 sends an empty list, and naming sdk_index is refused.
     assert release.runtime_features == ["output_cap_continue", "image_history_append_only", "cache_ttl_1h"]
-    assert release.runtime_features_source == "offline_task"
-    older = driver(runtime_profile=REASON_AGENT_1_2_RUNTIME_PROFILE)
-    older._apply_agent_network("no-network")
-    assert older.runtime_features == []
+    assert release.runtime_features_source == "release_default_without_web"
+    assert driver(runtime_profile=REASON_AGENT_1_2_RUNTIME_PROFILE).runtime_features == []
+    with pytest.raises(ValueError, match="sdk_index would give the Session Reason's cloud web tools"):
+        driver(runtime_features="sdk_index,cache_ttl_1h")

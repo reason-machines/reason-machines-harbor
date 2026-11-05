@@ -96,8 +96,8 @@ EPHEMERAL_ONLY_RUNTIME_PROFILES = {REASON_V7_2026_10_RUNTIME_PROFILE, REASON_V7_
                                    REASON_AGENT_1_3_RUNTIME_PROFILE}
 RUNTIME_PROFILES = {*V7_RUNTIME_PROFILES, *EPHEMERAL_ONLY_RUNTIME_PROFILES}
 # Requested as experimental_runtime_features: the Reason features an ephemeral v7
-# Session runs on top of the stock harness. An empty list is stock's shape; None sends
-# nothing, so the deployment's default set runs. Preflight refuses features the
+# Session runs on top of the stock harness. An empty list is stock's shape; an ephemeral
+# Session that names none sends its release's default without web tools (below). Preflight refuses features the
 # deployment does not advertise: one that predates the field would ignore it.
 # recovery_defer_idle_hands is an opt-in recovery experiment, never a default, and
 # so are the fewer_tests_* rungs asking for fewer new tests (the server refuses two at once),
@@ -113,14 +113,17 @@ RUNTIME_FEATURES = ("banner", "sdk_index", "service_tier", "output_cap", "git_me
                     "turn_line_removed", "turn_line_questions",
                     "output_cap_continue", "image_history_append_only", "cache_ttl_1h")
 # sdk_index puts Reason's tools in codemode, and they include web_search and
-# web_fetch, which run in Reason's cloud and so bypass the task's network policy.
-# An offline task (agent phase not public: DeepSWE) that names no features gets
-# this list instead of the deployment default, as Artificial Analysis disables
-# provider-hosted search and browsing to keep such tasks offline.
-OFFLINE_TASK_RUNTIME_FEATURES: list[str] = []
-# A release whose default features include more than sdk_index keeps the rest offline:
+# web_fetch, which run in Reason's cloud and so bypass the task's network policy
+# whatever its agent network mode. A benchmark Session never searches the web
+# (2026-11-03: Terminal-Bench agents found their own task's solution online),
+# so an ephemeral Session always sends features without these, and naming one is refused.
+WEB_RUNTIME_FEATURES = frozenset({"sdk_index"})
+# What an ephemeral Session that names no features sends instead of the deployment
+# default, as Artificial Analysis disables provider-hosted search and browsing.
+NO_WEB_RUNTIME_FEATURES: list[str] = []
+# A release whose default features include more than sdk_index keeps the rest:
 # its default without sdk_index.
-RELEASE_OFFLINE_TASK_RUNTIME_FEATURES: dict[str, list[str]] = {
+RELEASE_NO_WEB_RUNTIME_FEATURES: dict[str, list[str]] = {
     REASON_AGENT_1_3_RUNTIME_PROFILE: ["output_cap_continue", "image_history_append_only", "cache_ttl_1h"],
 }
 WORKSPACE_OWNERSHIP = "externally-managed"
@@ -369,8 +372,20 @@ class ReasonDriver:
         self.runtime_features = parse_runtime_features(runtime_features)
         if self.runtime_features is not None and not self._features_apply():
             raise ValueError(f"runtime_features requires ephemeral mode and the default harness ({C2_TOOLS_V7_RUNTIME_PROFILE}) or a dated release")
-        # Why runtime_features was sent: "requested" (configured) or "offline_task".
+        # Why runtime_features was sent: "requested" (configured) or "release_default_without_web".
         self.runtime_features_source = None if self.runtime_features is None else "requested"
+        if self._features_apply():
+            no_web = RELEASE_NO_WEB_RUNTIME_FEATURES.get(self.runtime_profile, NO_WEB_RUNTIME_FEATURES)
+            web = sorted(WEB_RUNTIME_FEATURES & set(self.runtime_features or ()))
+            if web:
+                raise ValueError(
+                    f"runtime_features {', '.join(web)} would give the Session Reason's cloud web tools (web_search, web_fetch), "
+                    "which run outside the task sandbox and bypass its network policy; benchmark Sessions never get them. "
+                    f"Name runtime_features without {', '.join(web)}, or none for this release's default without web tools "
+                    f"({','.join(no_web) or 'an empty list'}).")
+            if self.runtime_features is None:
+                self.runtime_features = list(no_web)
+                self.runtime_features_source = "release_default_without_web"
         if channel is None:
             channel = os.environ.get("REASON_CHANNEL")
             if not channel:
@@ -506,15 +521,6 @@ class ReasonDriver:
     def _features_apply(self) -> bool:
         """Only an ephemeral Session of the default harness or a v7 profile reads runtime features."""
         return self.mode == "ephemeral" and (self.runtime_profile is None or self.runtime_profile in V7_RUNTIME_PROFILES)
-
-    def _apply_agent_network(self, agent_network_mode: str | None) -> None:
-        """An offline task runs without Reason's cloud-side web tools unless features were named."""
-        self.agent_network_mode = agent_network_mode
-        if (agent_network_mode not in (None, "public") and self.runtime_features is None
-                and self._features_apply()):
-            self.runtime_features = list(RELEASE_OFFLINE_TASK_RUNTIME_FEATURES.get(self.runtime_profile,
-                                                                               OFFLINE_TASK_RUNTIME_FEATURES))
-            self.runtime_features_source = "offline_task"
 
     def _format_model_credential_error(self, error: ReasonAPIError) -> ReasonAPIError:
         domain = "staging.reasonmachines.ai" if self.channel == "staging" else "reasonmachines.ai"
@@ -1475,7 +1481,7 @@ class ReasonDriver:
                   agent_network_mode: str | None = None) -> None:
         if not self.workspace:
             raise RuntimeError("setup must run before run")
-        self._apply_agent_network(agent_network_mode)
+        self.agent_network_mode = agent_network_mode
         if self.mode != "ephemeral":
             return await self._run(instruction, environment, context, self.key)
         async with httpx.AsyncClient(
