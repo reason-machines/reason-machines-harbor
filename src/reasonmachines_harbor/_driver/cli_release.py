@@ -73,6 +73,12 @@ RELEASE_CLI_ARCHIVES = {
         "archive_sha256": "6d9dcade664b25e87ab21a5d19cead022b5484772ca2bf6468a3640ad3325c75",
         "musl_archive_sha256": "509c399541555777a6465c899e3ecf1517831ee40fcc65ece654e3ab50082c6c",
     },
+    # 1.3's worker: runtime/reason-agent-1.3.1 changes only server-side behaviour.
+    "runtime/reason-agent-1.3.1": {
+        "version": "0.2.625",
+        "archive_sha256": "6d9dcade664b25e87ab21a5d19cead022b5484772ca2bf6468a3640ad3325c75",
+        "musl_archive_sha256": "509c399541555777a6465c899e3ecf1517831ee40fcc65ece654e3ab50082c6c",
+    },
 }
 # A dated benchmark release that ships agent tools (rg, file, xxd, strings, unzip,
 # apply_patch: packages/reason-machines-driver/agent-tools) installs this archive
@@ -96,6 +102,11 @@ RELEASE_AGENT_TOOLS = {
     },
     # 1.2's tools plus bc, pkill, pgrep, free and which (BusyBox applets) and column (util-linux).
     "runtime/reason-agent-1.3": {
+        "url": "https://github.com/reason-machines/benchmark/releases/download/agent-tools-2026-10-27/agent-tools-linux-x64.tgz",
+        "sha256": "00252f67c979c7ab175e77cde6ca8e974c23aebe4da62ac747bd73050b2ede72",
+    },
+    # 1.3's archive: runtime/reason-agent-1.3.1 ships the same agent tools.
+    "runtime/reason-agent-1.3.1": {
         "url": "https://github.com/reason-machines/benchmark/releases/download/agent-tools-2026-10-27/agent-tools-linux-x64.tgz",
         "sha256": "00252f67c979c7ab175e77cde6ca8e974c23aebe4da62ac747bd73050b2ede72",
     },
