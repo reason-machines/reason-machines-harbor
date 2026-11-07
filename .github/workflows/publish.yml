@@ -1,23 +1,64 @@
-# Publishes to PyPI when a GitHub release is published. Needs a PyPI trusted
+# Publishes to PyPI when a GitHub release is published, or when run by hand
+# (workflow_dispatch) from main with the version in pyproject.toml; a manual
+# run then creates the GitHub release v<version>. A release made with
+# GITHUB_TOKEN does not trigger this workflow again. Needs a PyPI trusted
 # publisher for this repository and workflow, with environment "pypi".
 name: Publish to PyPI
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish, matching pyproject.toml (e.g. 0.3.48)
+        required: true
+        type: string
 permissions:
   contents: read
 jobs:
+  guard:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Check ref, version and tag
+        env:
+          VERSION: ${{ inputs.version }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::Run this workflow from main (got $REF)"; exit 1
+          fi
+          project_version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [ "$VERSION" != "$project_version" ]; then
+            echo "::error::Input version $VERSION does not match pyproject.toml version $project_version"; exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::Tag v$VERSION already exists"; exit 1
+          fi
   test:
+    needs: guard
+    if: ${{ !failure() && !cancelled() }}
     uses: ./.github/workflows/test.yml
   publish:
     needs: test
+    if: ${{ !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
       - run: uv build
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+      - name: Create GitHub release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: gh release create "v$VERSION" --target "${{ github.sha }}" --title "$VERSION" --generate-notes
