@@ -1,4 +1,4 @@
-"""An ephemeral trial that names no runtime_profile runs the current frozen release, Reason Agent 1.3.
+"""An ephemeral trial that names no runtime_profile runs the current frozen release, Reason Agent 1.3.1.
 
 Benchmark results then name one frozen harness without the command asking for it.
 Naming a profile overrides it, and standard mode keeps the server's default.
@@ -10,6 +10,7 @@ from reasonmachines_harbor._driver.driver import (
     DEFAULT_EPHEMERAL_RUNTIME_PROFILE,
     REASON_AGENT_1_2_RUNTIME_PROFILE,
     REASON_AGENT_1_3_RUNTIME_PROFILE,
+    REASON_AGENT_1_3_1_RUNTIME_PROFILE,
     REASON_V7_2026_10_RUNTIME_PROFILE,
     REASON_V7_2026_11_RUNTIME_PROFILE,
     REASON_V8_1_2026_10_RUNTIME_PROFILE,
@@ -25,9 +26,9 @@ def driver(tmp_path, monkeypatch):
 
 
 def test_ephemeral_without_a_profile_runs_the_frozen_release(driver):
-    assert DEFAULT_EPHEMERAL_RUNTIME_PROFILE == REASON_AGENT_1_3_RUNTIME_PROFILE == "runtime/reason-agent-1.3"
-    assert driver().runtime_profile == REASON_AGENT_1_3_RUNTIME_PROFILE
-    assert driver(mode="ephemeral").runtime_profile == REASON_AGENT_1_3_RUNTIME_PROFILE
+    assert DEFAULT_EPHEMERAL_RUNTIME_PROFILE == REASON_AGENT_1_3_1_RUNTIME_PROFILE == "runtime/reason-agent-1.3.1"
+    assert driver().runtime_profile == REASON_AGENT_1_3_1_RUNTIME_PROFILE
+    assert driver(mode="ephemeral").runtime_profile == REASON_AGENT_1_3_1_RUNTIME_PROFILE
 
 
 def test_a_named_profile_overrides_the_default(driver):
@@ -127,10 +128,10 @@ def test_agent_1_2_runs_v8_2s_worker_and_installs_v8_2s_pinned_agent_tools(drive
     assert release.agent_tools_sha == "059652fc47297dfab47833917f11d02858c8e34fb9bfd45bcd66d381d695cab5"
 
 
-def test_the_default_release_1_3_pins_its_worker_and_agent_tools_and_keeps_its_default_features_offline(driver):
+def test_release_1_3_pins_its_worker_and_agent_tools_and_keeps_its_default_features_offline(driver):
     from reasonmachines_harbor._driver.cli_release import RELEASE_AGENT_TOOLS, release_archive
 
-    release = driver()
+    release = driver(runtime_profile=REASON_AGENT_1_3_RUNTIME_PROFILE)
     assert release.runtime_profile == REASON_AGENT_1_3_RUNTIME_PROFILE
     with pytest.raises(Exception):
         driver(mode="standard", runtime_profile=REASON_AGENT_1_3_RUNTIME_PROFILE)
@@ -152,3 +153,26 @@ def test_the_default_release_1_3_pins_its_worker_and_agent_tools_and_keeps_its_d
     assert driver(runtime_profile=REASON_AGENT_1_2_RUNTIME_PROFILE).runtime_features == []
     with pytest.raises(ValueError, match="sdk_index would give the Session Reason's cloud web tools"):
         driver(runtime_features="sdk_index,cache_ttl_1h")
+
+
+def test_the_default_release_1_3_1_runs_1_3s_worker_and_agent_tools_and_its_no_web_default(driver):
+    from reasonmachines_harbor._driver.cli_release import RELEASE_AGENT_TOOLS, RELEASE_CLI_ARCHIVES, release_archive
+
+    release = driver()
+    assert release.runtime_profile == REASON_AGENT_1_3_1_RUNTIME_PROFILE
+    with pytest.raises(Exception):
+        driver(mode="standard", runtime_profile=REASON_AGENT_1_3_1_RUNTIME_PROFILE)
+    # 1.3.1 changes only server-side behaviour: 1.3's pinned worker CLI and agent tools.
+    assert RELEASE_CLI_ARCHIVES[REASON_AGENT_1_3_1_RUNTIME_PROFILE] == RELEASE_CLI_ARCHIVES[REASON_AGENT_1_3_RUNTIME_PROFILE] == {
+        "version": "0.2.625",
+        "archive_sha256": "6d9dcade664b25e87ab21a5d19cead022b5484772ca2bf6468a3640ad3325c75",
+        "musl_archive_sha256": "509c399541555777a6465c899e3ecf1517831ee40fcc65ece654e3ab50082c6c",
+    }
+    assert release_archive(REASON_AGENT_1_3_1_RUNTIME_PROFILE)["selected_version"] == "0.2.625"
+    assert RELEASE_AGENT_TOOLS[REASON_AGENT_1_3_1_RUNTIME_PROFILE] == RELEASE_AGENT_TOOLS[REASON_AGENT_1_3_RUNTIME_PROFILE]
+    assert release.installs_agent_tools and release.agent_tools_sha == "00252f67c979c7ab175e77cde6ca8e974c23aebe4da62ac747bd73050b2ede72"
+    # Every task runs the release's no-web default (its own server default: no sdk_index).
+    assert release.runtime_features == ["output_cap_continue", "image_history_append_only", "cache_ttl_1h"]
+    assert release.runtime_features_source == "release_default_without_web"
+    with pytest.raises(ValueError, match="sdk_index would give the Session Reason's cloud web tools"):
+        driver(runtime_features="sdk_index")

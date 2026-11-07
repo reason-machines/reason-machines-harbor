@@ -53,7 +53,7 @@ reported by code, for example `missing_scope` or
 |---|---|---|
 | `reasoning_effort` | `medium` | `minimal`, `low`, `medium`, `high`, `xhigh` or `max` |
 | `mode` | `ephemeral` | `ephemeral`: a new single-use workspace per trial, with memory and skills on. `standard`: your own workspace |
-| `runtime_profile` | `runtime/reason-agent-1.3` in ephemeral mode; the server default in standard mode | A harness listed by `GET /v3/deployment`. The default is the frozen Reason Agent 1.3 release: it never changes, and its trials install the CLI and agent tools it pins (CLI 0.2.625, agent-tools-2026-10-27). Name an earlier release to rerun it, for example `runtime/reason-agent-1.2`; `runtime/reason-c2-tools-v7` runs the deployment's current default instead |
+| `runtime_profile` | `runtime/reason-agent-1.3.1` in ephemeral mode; the server default in standard mode | A harness listed by `GET /v3/deployment`. The default is the frozen Reason Agent 1.3.1 release: it never changes, and its trials install the CLI and agent tools it pins (CLI 0.2.625, agent-tools-2026-10-27). 1.3.1 is 1.3 with a response cut at the output cap carrying its unfinished thinking forward as text, and no web tools by default (`output_cap_continue`, `image_history_append_only`, `cache_ttl_1h`). Name an earlier release to rerun it, for example `runtime/reason-agent-1.3`; `runtime/reason-c2-tools-v7` runs the deployment's current default instead |
 
 Ephemeral mode needs an owner or admin key of a workspace with paid model
 access. To bill the model to your own provider account, connect its API key
