@@ -38,6 +38,10 @@ class AdapterRuntimeConfig:
     diagnostics_timeout_sec: int = 10
     command_timeout_sec: int = 30
     cleanup_timeout_sec: int = 15
+    # How long cleanup waits for a Session it cancelled to leave running before
+    # it exports the trajectory as it stands. The export must precede the
+    # workspace retirement, and the framework waits for cleanup before grading.
+    cleanup_export_wait_sec: float = 90.0
     worker_stop_timeout_sec: int = 25
 
     archive_redirect_max_hops: int = 6

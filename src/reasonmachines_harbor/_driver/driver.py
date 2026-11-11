@@ -516,6 +516,9 @@ class ReasonDriver:
         self.root_fingerprint: str | None = None
         self.ara_session_id: str | None = None
         self.finished = False
+        # The last event read and the Session as last polled; cleanup resumes from them.
+        self.event_cursor = -1
+        self.session: dict | None = None
         self.client: httpx.AsyncClient | None = None
         self.workspace = ""
         self.image_env: dict[str, str] = {}
@@ -603,6 +606,8 @@ class ReasonDriver:
             "execution_budget": {"wall_clock_max_ms": self.session_wall_clock_max_ms},
             "idempotency_key": f"{self.label}-{self.trial_key}", "completion_mode": "run_outcome",
             "mode": self.mode, "workspace_ownership": WORKSPACE_OWNERSHIP,
+            # The trial's files exist only on this worker: losing it reports the loss, never moves the trial to cloud.
+            "task_bound_to_device": True,
             "target": {"kind": "headless", "device_id": self.device_id,
                        "root_id": root_id, "workspace_mode": "project_root"},
         }
@@ -1330,6 +1335,66 @@ class ReasonDriver:
         path.write_text(json.dumps(value, indent=2) + "\n")
         path.chmod(0o600)
 
+    def _record_poll(self, event_batch):
+        """Append a poll's events to events.jsonl and save its Session as session.json."""
+        if event_batch["items"]:
+            with (self.logs_dir / "events.jsonl").open("a") as events:
+                for item in event_batch["items"]:
+                    events.write(json.dumps(item) + "\n")
+            (self.logs_dir / "events.jsonl").chmod(0o600)
+            self.event_cursor = event_batch["next_seq"]
+        self.session = event_batch["session"]
+        self._save("session.json", self.session)
+
+    async def _export_unfinished_session(self) -> list[str]:
+        """Record a Session run() did not see end as a finished one is recorded.
+
+        The framework's timeout cancels run() between polls, leaving a session.json
+        that says running and no trajectory.json, so the attempt has no harness
+        digest, token usage or cost. Cleanup has cancelled the Session by now: wait,
+        bounded, for it to leave running, reading its last events, then export its
+        trajectory. Returns what failed; never raises.
+        """
+        config = DEFAULT_RUNTIME_CONFIG
+        session_path = f"sessions/{quote(self.ara_session_id, safe='')}"
+        errors = []
+        deadline = time.monotonic() + config.cleanup_export_wait_sec
+        try:
+            while True:
+                poll_started = time.monotonic()
+                event_batch = await self._cleanup_api(
+                    "GET",
+                    f"{session_path}/events?after_seq={self.event_cursor}"
+                    f"&limit={config.event_page_size}&wait_ms={config.poll_wait_ms}",
+                )
+                self._record_poll(event_batch)
+                running = event_batch["session"]["status"] == "running"
+                # A full page at the Session's end has more behind it.
+                if not running and len(event_batch["items"]) < config.event_page_size:
+                    break
+                # The bound covers both waits: the retirement and the grading are behind this loop.
+                if time.monotonic() >= deadline:
+                    errors.append(("Session was still running at the trajectory export, " if running
+                                   else "Session's last events were not all read, ")
+                                  + f"{config.cleanup_export_wait_sec:g} seconds after its cancellation")
+                    break
+                if running:
+                    # The server holds an empty poll open until the Session changes; never spin if it answers at once.
+                    await asyncio.sleep(max(0.0, 2.0 - (time.monotonic() - poll_started)))
+        except Exception:
+            errors.append("final Session state read failed")
+        try:
+            self._save("trajectory.json", await self._cleanup_api("GET", f"{session_path}/trajectory"))
+        except Exception:
+            errors.append("Session trajectory export failed")
+        return errors
+
+    @staticmethod
+    def _record_session_usage(context, session):
+        context.n_input_tokens = (session.get("usage") or {}).get("input_tokens")
+        context.n_output_tokens = (session.get("usage") or {}).get("output_tokens")
+        context.cost_usd = session.get("cost_usd")
+
     @staticmethod
     def _is_worker_status_timeout(error):
         return (
@@ -1447,6 +1512,15 @@ class ReasonDriver:
         worker_exit = await self._await_worker_exit(env)
         if worker_exit not in ("exited", "forced", "not_started"):
             failures.append(f"worker did not exit ({worker_exit})")
+        # Before the retirement below ends the child key: afterwards no key can
+        # read this Session. A failed export is recorded, and fails cleanup only
+        # for a Session that did not finish, never a trial that ran to its end.
+        export_errors = []
+        if self.ara_session_id and not (self.logs_dir / "trajectory.json").exists():
+            export_errors = await self._export_unfinished_session()
+            if not self.finished:
+                failures += export_errors
+                export_errors = []
 
         # Revoke only after the stop: a worker revoked first exits on its own,
         # and its stop then fails with worker_revoked_or_expired. The Device
@@ -1478,7 +1552,7 @@ class ReasonDriver:
         )
         failures += revoke_errors + guest_errors
         receipt = {"session_id": self.ara_session_id, "device_id": self.device_id, "worker_exit": worker_exit,
-                   "errors": failures}
+                   "errors": failures + export_errors}
         if retired is not None:
             receipt["ephemeral_workspace"] = retired
         self._save("cleanup.json", receipt)
@@ -1587,7 +1661,6 @@ class ReasonDriver:
                     # Cleanup cancels it; the framework may retry the trial.
                     if self.runtime_features is not None and created.get("experimental_runtime_features") != self.runtime_features:
                         raise RuntimeError("the Session did not record the requested runtime features; refusing to run another configuration")
-                    cursor = -1
                     last_tool_result = ""
                     poll_failures = 0
                     retry_delay = max(1.0, self.poll_interval)
@@ -1598,7 +1671,7 @@ class ReasonDriver:
                         try:
                             event_batch = await self._api(
                                 "GET",
-                                f"sessions/{quote(self.ara_session_id, safe='')}/events?after_seq={cursor}"
+                                f"sessions/{quote(self.ara_session_id, safe='')}/events?after_seq={self.event_cursor}"
                                 f"&limit={DEFAULT_RUNTIME_CONFIG.event_page_size}&wait_ms={DEFAULT_RUNTIME_CONFIG.poll_wait_ms}",
                             )
                         except (ReasonAPIError, ReasonAPITransportError) as poll_error:
@@ -1616,20 +1689,14 @@ class ReasonDriver:
                         retry_delay = max(1.0, self.poll_interval)
                         session = event_batch["session"]
                         items = event_batch["items"]
+                        self._record_poll(event_batch)
                         if items:
-                            with (self.logs_dir / "events.jsonl").open("a") as events:
-                                for item in items:
-                                    events.write(json.dumps(item) + "\n")
-                                    if item.get("type") == "tool_result":
-                                        last_tool_result = str((item.get("data") or {}).get("content") or item.get("text") or "")
-                            (self.logs_dir / "events.jsonl").chmod(0o600)
-                            cursor = event_batch["next_seq"]
+                            for item in items:
+                                if item.get("type") == "tool_result":
+                                    last_tool_result = str((item.get("data") or {}).get("content") or item.get("text") or "")
                             # A full page means more are waiting: fetch them now.
                             poll_delay = 0.0 if len(items) >= DEFAULT_RUNTIME_CONFIG.event_page_size else self.poll_interval
-                        self._save("session.json", session)
-                        context.n_input_tokens = (session.get("usage") or {}).get("input_tokens")
-                        context.n_output_tokens = (session.get("usage") or {}).get("output_tokens")
-                        context.cost_usd = session.get("cost_usd")
+                        self._record_session_usage(context, session)
                         # A full page that arrives with the Session's end has more behind it: page it in first,
                         # so events.jsonl and the last tool result are complete.
                         if session["status"] != "running" and len(items) >= DEFAULT_RUNTIME_CONFIG.event_page_size:
@@ -1665,7 +1732,6 @@ class ReasonDriver:
                         # the base interval. Time the server spent waiting counts.
                         await asyncio.sleep(max(0.0, poll_delay - (time.monotonic() - poll_started)))
                         poll_delay = min(idle_poll_delay_max, max(self.poll_interval, poll_delay * 2))
-                self.populate_context(context)
                 context.metadata["stage"] = "complete"
             finally:
                 # Framework cancellation must not abandon the remote agent. Shield the bounded cleanup.
@@ -1685,6 +1751,12 @@ class ReasonDriver:
                     if original_error is None:
                         raise
                     original_error.add_note(f"Cleanup also failed: {cleanup_error}")
+                finally:
+                    # The trajectory's totals replace the polled Session's. After a framework
+                    # timeout both come from cleanup, so the trial's result still carries them.
+                    if self.session is not None:
+                        self._record_session_usage(context, self.session)
+                    self.populate_context(context)
 
     def populate_context(self, context: Any) -> None:
         """Copy the exported trajectory's final metrics onto the framework context.
