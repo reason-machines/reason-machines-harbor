@@ -23,6 +23,7 @@ import re
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from functools import cache
 from pathlib import Path
@@ -94,6 +95,11 @@ def _token(host: str, repository: str) -> str | None:
     fields = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
     if "realm" not in fields:
         return None
+    # The realm comes from the registry the task names. urllib also opens file: and ftp: URLs, and
+    # a token read from one would be sent on to that registry.
+    realm = urllib.parse.urlsplit(fields["realm"])
+    if realm.scheme != "https" or not realm.hostname:
+        raise ValueError(f"registry {host} names a token realm that is not an HTTPS URL")
     data = json.loads(_get(f"{fields['realm']}?service={fields.get('service', '')}"
                            f"&scope=repository:{repository}:pull", None, basic=_dockerhub_basic(host)))
     return data.get("token") or data.get("access_token")
