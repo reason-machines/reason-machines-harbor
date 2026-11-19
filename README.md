@@ -43,6 +43,14 @@ The worker connects out to the Reason API and relay, so both
 `--env reasonmachines_harbor.environment:ReasonE2BEnvironment`: it keeps the
 task image's environment variables, PATH included, which e2b otherwise drops.
 
+On [Munito](https://docs.munito.ai/sandboxes), use
+`--env reasonmachines_harbor.munito_environment:ReasonMunitoEnvironment` with
+`MUNITO_API_KEY` set. Each trial runs under Docker Compose in its own sandbox,
+so sidecar tasks work; there are no GPUs. On
+[Superserve](https://docs.superserve.ai), install the `superserve` extra and use
+`--env reasonmachines_harbor.superserve_environment:ReasonSuperserveEnvironment`
+with `SUPERSERVE_API_KEY` set; it runs single-container tasks only.
+
 Each trial's `agent/` folder holds the Session as the model saw it
 (`trajectory.json`, ATIF), its link, status and cost (`session.json`) and
 what it ran on (`receipt.json`, `deployment.json`). API errors are

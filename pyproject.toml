@@ -12,6 +12,10 @@ requires-python = ">=3.12"
 # Tested on Harbor 0.22.0 and 0.25.0; the upper bound waits for each new minor to be tested.
 dependencies = ["harbor>=0.22.0,<0.26", "httpx>=0.28,<0.29", "pyyaml>=6,<7"]
 
+[project.optional-dependencies]
+# Only ReasonSuperserveEnvironment imports it.
+superserve = ["superserve==0.12.1"]
+
 [project.urls]
 Homepage = "https://reasonmachines.ai"
 Source = "https://github.com/reason-machines/reason-machines-harbor"
